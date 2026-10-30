@@ -38,6 +38,7 @@ body {
   gap: 16px; margin-bottom: 22px;
 }
 .brand { display: flex; gap: 14px; align-items: center; }
+.logo img { width: 36px; height: 36px; display: block; border-radius: 10px; }
 .logo {
   width: 48px; height: 48px; border-radius: 14px;
   display: grid; place-items: center;

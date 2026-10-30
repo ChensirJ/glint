@@ -41,6 +41,7 @@ public final class DiagnosticsHandler {
         router.add(HttpMethod.GET, base + "/app.js", (req, resp) -> serveDashboard(resp, "/app.js"));
         router.add(HttpMethod.GET, base + "/styles.css", (req, resp) -> serveDashboard(resp, "/styles.css"));
         router.add(HttpMethod.GET, base + "/favicon.png", (req, resp) -> serveDashboard(resp, "/favicon.png"));
+        router.add(HttpMethod.GET, base + "/logo.png", (req, resp) -> serveDashboard(resp, "/logo.png"));
 
         router.add(HttpMethod.GET, base + "/api/metrics", (req, resp) ->
                 resp.json(Json.stringify(Trace.METRICS.snapshot())));
