@@ -153,6 +153,7 @@ spring:
 | Property | Default | Notes |
 |----------|---------|-------|
 | `server.port` | `8080` | Standard Boot listen port. |
+| `server.address` | all interfaces | Bind to one local address (for example `127.0.0.1`). |
 | `glint.diagnostics` | `true` | Mount `/_vt`. |
 | `glint.static.*` | off | `enabled`, `prefix` (`/static`), `location` (path or `classpath:`), `cache-max-entry-bytes`, `cache-max-total-bytes`, `revalidate-millis`, `cache-control`, `precompressed`, `directory-listing`. Served by Glint before Spring MVC. |
 | `glint.access-log.*` | off | `enabled`, `format` = `text` or `json` (JSON Lines). |
@@ -273,7 +274,7 @@ Numbers are machine-local, loopback-only, and not a guarantee of production rank
 
 ### Realistic suite (same handlers on both servers, separate JVMs, median of 3 rounds)
 
-Captured **2026-10-30 15:56 CST** (Asia/Shanghai). Each server runs in its own JVM (`-Xms256m -Xmx1g`); handlers are the same `BenchApp` code; the load generator is a separate JVM using raw HTTP/1.1 sockets on virtual threads. Every cell finished with 0 errors, 0 connect errors, and 0 timeouts.
+Captured **2026-10-30 15:56 CST** (Asia/Shanghai). Each server runs in its own JVM (`-Xms256m -Xmx1g`); handlers are the same `BenchApp` code; the load generator is a separate JVM using raw HTTP/1.1 sockets on virtual threads. Every cell finished with 0 errors, 0 connect errors, and 0 timeouts. The two JSON rows were re-measured at 17:10 CST (single round) after the Windows timer fix; see [docs/bench-results.md](docs/bench-results.md).
 
 | Scenario | Clients | Glint req/s | Tomcat req/s | Glint p99 ms | Tomcat p99 ms | Winner |
 |----------|--------:|------------:|-------------:|-------------:|--------------:|--------|
@@ -282,20 +283,20 @@ Captured **2026-10-30 15:56 CST** (Asia/Shanghai). Each server runs in its own J
 | Blocking downstream (50 ms) | 1000 | 15,875 | 3,124 | 64.6 | 316.3 | Glint |
 | Blocking downstream (50 ms) | 2000 | 31,788 | 2,997 | 66.2 | 631.5 | Glint |
 | Blocking downstream (50 ms) | 4000 | 56,031 | 2,738 | 81.4 | 1,262.8 | Glint |
-| JSON parse + 15 ms DB wait + CPU | 200 | 6,421 | 11,848 | 35.7 | 21.5 | **Tomcat** |
-| JSON parse + 15 ms DB wait + CPU | 1000 | 24,436 | 12,035 | 68.5 | 100.9 | Glint |
+| JSON parse + 15 ms DB wait + CPU | 200 | 11,927 | 11,759 | 20.7 | 21.6 | Tie |
+| JSON parse + 15 ms DB wait + CPU | 1000 | 39,523 | 11,968 | 39.2 | 88.7 | Glint |
 | Mixed: 70% API / 20% 4 KiB / 10% 1 MiB static | 500 | 24,520 | 18,401 | 74.1 | 49.6 | Glint on req/s, **Tomcat** on p99 |
 | Keep-alive tiny JSON | 64 | 84,771 | 85,244 | 2.1 | 2.3 | Tie |
 | New connection per request | 64 | 20,714 | 17,759 | 4.5 | 5.2 | Glint |
 | 1 MiB upload (stream + CRC32) | 64 | 5,631 | 7,200 | 27.0 | 28.8 | **Tomcat** |
 
-Peak platform threads: Glint 33-41 vs Tomcat 212 in every scenario. Memory goes both ways. For example, at JSON 1000 clients Glint peaked at 618 MiB heap / 766 MiB RSS against Tomcat's 361 / 516 MiB, at twice the throughput.
+Peak platform threads: Glint 33-41 vs Tomcat 212 in every scenario. Memory goes both ways. For example, at JSON 1000 clients Glint peaked at 717 MiB heap / 1113 MiB RSS against Tomcat's 233 / 447 MiB, at about 3.3x the throughput.
 
 What this shows, including where Tomcat wins:
 
 - **Blocking I/O is the Glint case.** Tomcat is capped near `maxThreads / latency` (200 / ~62 ms = ~3.2k req/s), and its queueing latency grows with clients. Glint keeps one virtual thread per connection, so throughput scales with clients and p50 stays at the downstream latency until the CPU saturates.
 - **Tomcat still leads uploads (~1.3x).** After adding `bodyStream()` / `bodyChannel()`, Glint no longer buffers the whole 1 MiB body before the handler (heap peak dropped from ~538 MiB to ~158 MiB on this cell). Throughput rose from 1,018 to 5,631 req/s. Tomcat remains ahead at 7,200 req/s median on this Windows closed-loop run; Glint won one of the three rounds (5,602 vs 4,986).
-- **Tomcat wins JSON + DB wait at 200 clients.** At this load Tomcat's 200 platform threads are enough. In Glint, the simulated DB wait is `Thread.sleep` on a virtual thread. On Windows with JDK 21 that is coarser under load: a micro-check with 200 staggered sleepers measured `sleep(15)` at 21.05 ms on virtual threads vs 15.48 ms on platform threads. That explains part of the gap, not all of it. Above 200 clients Glint pulls ahead.
+- **JSON + DB wait at 200 clients is now a tie (was a Tomcat win).** The old gap (6,421 vs 11,848 req/s) was the Windows timer: virtual-thread sleeps never raise the OS timer resolution, so a 15 ms wait took about 31 ms. Glint now keeps the 1 ms timer resolution active while a server runs (Windows only, `-Dglint.highResolutionTimer=false` to opt out). This is a timer effect, not a faster request path.
 - **Mixed traffic:** Glint serves more requests, but its API p99 is worse than Tomcat's (76 vs 50 ms) in the median round, and Glint's round-to-round spread was wider (22.6k-28.9k req/s).
 - Keep-alive tiny responses are a tie. With a new connection per request, Glint is ~17% ahead.
 
@@ -323,6 +324,7 @@ Static 1 KiB before this release: Glint 9,214 vs Tomcat 20,081 req/s. Profiling 
 - `ThreadLocal` for request context (not preview `ScopedValue`).
 - Hot paths avoid `synchronized`  - prefer `ReentrantLock` / concurrent collections.
 - `PinningWatcher` listens for `jdk.VirtualThreadPinned` via `RecordingStream`.
+- Windows: virtual-thread timed waits do not raise the OS timer resolution (default tick ~15.6 ms), so `VtServer` keeps a daemon `glint-hires-timer` thread asleep while running to hold 1 ms resolution. Opt out with `ServerConfig.builder().highResolutionTimer(false)` or `-Dglint.highResolutionTimer=false`.
 
 ## Build & test
 

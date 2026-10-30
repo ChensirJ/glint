@@ -32,7 +32,7 @@ Numbers are machine-local and not a guarantee of production ranking.
 Numbers are machine-local and not a guarantee of production ranking.
 ## Realistic suite (Glint vs Tomcat, same app logic)
 
-- Captured: **2026-10-30 16:22:35 CST** (Asia/Shanghai); upload-1MiB rows re-measured after streaming bodies (other realistic cells kept from 15:56:21 CST)
+- Captured: **2026-10-30 16:22:35 CST** (Asia/Shanghai); upload-1MiB rows re-measured after streaming bodies; json+db+cpu rows re-measured at **2026-10-30 17:10:39 CST** after the Windows timer fix (1 round, see note below); other realistic cells kept from 15:56:21 CST
 - CPU: AMD Ryzen 7 7840HS w/ Radeon 780M Graphics
 - Logical cores: 16
 - RAM: 31.2 GiB
@@ -66,10 +66,10 @@ Scenarios:
 | blocking-50ms | 2000 | Tomcat | 2997 | 2995-3004 | 620.20 | 631.53 | 643.03 | 0 | 0 | 0 | 185 | 310 | 212 |
 | blocking-50ms | 4000 | Glint | 56031 | 54657-56505 | 71.67 | 81.37 | 86.52 | 0 | 0 | 0 | 253 | 355 | 33 |
 | blocking-50ms | 4000 | Tomcat | 2738 | 2700-2761 | 1235.13 | 1262.78 | 1267.42 | 0 | 0 | 0 | 180 | 317 | 212 |
-| json+db+cpu | 200 | Glint | 6421 | 6418-6431 | 31.16 | 35.67 | 37.00 | 0 | 0 | 0 | 240 | 359 | 33 |
-| json+db+cpu | 200 | Tomcat | 11848 | 11798-11888 | 16.56 | 21.47 | 23.09 | 0 | 0 | 0 | 285 | 429 | 212 |
-| json+db+cpu | 1000 | Glint | 24436 | 24105-24790 | 39.64 | 68.49 | 77.85 | 0 | 0 | 0 | 618 | 766 | 33 |
-| json+db+cpu | 1000 | Tomcat | 12035 | 12011-12201 | 81.06 | 100.87 | 107.28 | 0 | 0 | 0 | 361 | 516 | 212 |
+| json+db+cpu | 200 | Glint | 11927 | 11927-11927 | 16.55 | 20.65 | 21.65 | 0 | 0 | 0 | 200 | 311 | 34 |
+| json+db+cpu | 200 | Tomcat | 11759 | 11759-11759 | 16.65 | 21.63 | 23.33 | 0 | 0 | 0 | 262 | 428 | 212 |
+| json+db+cpu | 1000 | Glint | 39523 | 39523-39523 | 23.50 | 39.22 | 41.43 | 0 | 0 | 0 | 717 | 1113 | 34 |
+| json+db+cpu | 1000 | Tomcat | 11968 | 11968-11968 | 82.51 | 88.71 | 90.14 | 0 | 0 | 0 | 233 | 447 | 212 |
 | mixed-traffic | 500 | Glint | 24520 | 22649-28936 | 18.90 | 74.14 | 112.69 | 0 | 0 | 0 | 161 | 354 | 41 |
 | mixed-traffic | 500 | Tomcat | 18401 | 15562-18625 | 28.19 | 49.56 | 75.00 | 0 | 0 | 0 | 363 | 532 | 212 |
 | keep-alive | 64 | Glint | 84771 | 72835-93879 | 0.68 | 2.14 | 3.50 | 0 | 0 | 0 | 157 | 349 | 41 |
@@ -92,6 +92,17 @@ Mixed-traffic breakdown (median round):
 
 errors = reset/EOF/non-200 on an established connection; connect errors = failed TCP connect (e.g. accept backlog full); timeouts = no response within 10 s. The generator closes sockets with SO_LINGER=0 (RST) to avoid client TIME_WAIT exhaustion.
 
-Caveats: closed-loop load (a slow server also slows the generator, so tail latency is understated versus an open-loop tool such as wrk2); generator and server share the same CPU; Glint streams request bodies via bodyStream()/bodyChannel() (bodyBytes() still buffers when called); platform-thread counts exclude Glint's virtual threads by design; simulated waits use Thread.sleep, and on Windows JDK 21 virtual-thread timed sleeps are coarser under load than platform-thread sleeps, which penalizes Glint in sleep-heavy cells.
+Caveats: closed-loop load (a slow server also slows the generator, so tail latency is understated versus an open-loop tool such as wrk2); generator and server share the same CPU; Glint streams request bodies via bodyStream()/bodyChannel() (bodyBytes() still buffers when called); platform-thread counts exclude Glint's virtual threads by design; simulated waits use Thread.sleep; on Windows the default timer tick is about 15.6 ms, which rounds short sleeps up (see the timer note below).
+
+## Windows timer note (json+db+cpu before/after)
+
+Root cause of the old json+db+cpu@200 loss: on Windows, virtual-thread timed waits park through the JDK scheduler and never raise the OS timer resolution, so a 15 ms sleep landed at about 31 ms (one 15.6 ms tick too late). Tomcat's platform-thread `Thread.sleep(15)` makes HotSpot raise the resolution to 1 ms, so it landed at about 16.6 ms. Since this change `VtServer` keeps a daemon platform thread (`glint-hires-timer`) in a long sleep while the server runs, which keeps the 1 ms resolution active for the whole process (Windows only; disable with `ServerConfig.builder().highResolutionTimer(false)` or `-Dglint.highResolutionTimer=false`). This is a timer-resolution effect, not a faster request path.
+
+| Cell | Before Glint req/s (p99 ms) | After Glint req/s (p99 ms) | Tomcat req/s (p99 ms) |
+|------|---------------------------:|---------------------------:|----------------------:|
+| json+db+cpu c=200 | 6,421 (35.7) | 11,927 (20.7) | 11,759 (21.6) |
+| json+db+cpu c=1000 | 24,436 (68.5) | 39,523 (39.2) | 11,968 (88.7) |
+
+Before = 3-round median from 15:56 CST; after = a single round at 17:10 CST (warmup 3 s, measure 8 s), so treat the after numbers as indicative. Memory at c=1000 went up with throughput: Glint heap peak 618 -> 717 MiB and RSS 766 -> 1113 MiB (Tomcat 233 MiB / 447 MiB in the same run). Not re-measured after the change: blocking-50ms (50 ms is a multiple of 10, so platform sleeps on both servers also landed at about 62.4 ms; the timer fix should move Glint closer to 50 ms but this is unverified), mixed-traffic, keep-alive, conn-per-req and upload-1MiB; those rows are unchanged and still show Tomcat ahead on mixed p99 and uploads.
 
 
