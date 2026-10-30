@@ -34,3 +34,5 @@ verify-out.txt
 # Maven dependency classpath dumps
 **/cp.txt
 glint-bench/bench-results.md
+
+_shots/
