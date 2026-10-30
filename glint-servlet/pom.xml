@@ -4,7 +4,7 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
   <modelVersion>4.0.0</modelVersion>
   <parent>
-    <groupId>io.github.glint</groupId>
+    <groupId>io.github.chensirj</groupId>
     <artifactId>glint-parent</artifactId>
     <version>0.1.0-SNAPSHOT</version>
   </parent>
@@ -13,7 +13,7 @@
   <description>Jakarta Servlet 6 adapter: sessions, multipart Parts, async, Spring MVC Hello World.</description>
   <dependencies>
     <dependency>
-      <groupId>io.github.glint</groupId>
+      <groupId>io.github.chensirj</groupId>
       <artifactId>glint-core</artifactId>
     </dependency>
     <dependency>
