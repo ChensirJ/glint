@@ -1,0 +1,54 @@
+name: Release
+
+# Pushing a tag such as v0.1.0 builds the library jars and attaches them to a GitHub Release.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish release jars
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: Set version from tag
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          mvn -B -ntp versions:set -DnewVersion="$VERSION" -DgenerateBackupPoms=false -DprocessAllModules=true
+
+      - name: Build and test
+        run: mvn -B -ntp clean verify
+
+      - name: Collect jars
+        run: |
+          mkdir -p dist
+          for m in glint-core glint-dashboard glint-servlet glint-spring-boot-starter; do
+            cp "$m/target/$m-$VERSION.jar" dist/
+            # Attach sources/javadoc jars too when the build produced them.
+            cp "$m"/target/"$m-$VERSION"-*.jar dist/ 2>/dev/null || true
+          done
+          (cd dist && sha256sum *.jar > SHA256SUMS.txt)
+          ls -l dist
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* --title "Glint $VERSION" --generate-notes
+          fi
