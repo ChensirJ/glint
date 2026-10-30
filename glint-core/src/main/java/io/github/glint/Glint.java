@@ -4,6 +4,7 @@ import io.github.glint.diag.DiagnosticsHandler;
 import io.github.glint.http.HttpMethod;
 import io.github.glint.http.ServerConfig;
 import io.github.glint.http.VtServer;
+import io.github.glint.http.staticfiles.StaticFiles;
 import io.github.glint.http.websocket.WebSocketHandler;
 import io.github.glint.http.websocket.WebSocketSupport;
 import io.github.glint.middleware.Middleware;
@@ -12,6 +13,7 @@ import io.github.glint.router.RouteHandler;
 import io.github.glint.router.Router;
 
 import java.io.IOException;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -23,6 +25,7 @@ import java.util.stream.Collectors;
  * <pre>{@code
  * Glint.create(8080)
  *     .get("/hello", (req, resp) -> resp.text("Hello"))
+ *     .staticFiles("/assets", Path.of("public"))
  *     .websocket("/ws/echo", (session, text) -> session.sendText(text))
  *     .diagnostics("/_vt")
  *     .start();
@@ -90,6 +93,25 @@ public final class Glint {
 
     public Glint options(String path, RouteHandler handler) {
         router.add(HttpMethod.OPTIONS, path, handler);
+        return this;
+    }
+
+    /**
+     * Mount a filesystem directory at {@code urlPrefix}.
+     * Serves MIME-typed files with HEAD support, basic {@code Range} bytes,
+     * and path-traversal protection.
+     */
+    public Glint staticFiles(String urlPrefix, Path directory) {
+        StaticFiles.mountDirectory(router, urlPrefix, directory);
+        return this;
+    }
+
+    /**
+     * Mount a classpath resource folder at {@code urlPrefix}.
+     * {@code classpathRoot} uses {@code /}-separated paths without a leading slash.
+     */
+    public Glint classpathFiles(String urlPrefix, String classpathRoot) {
+        StaticFiles.mountClasspath(router, urlPrefix, classpathRoot);
         return this;
     }
 

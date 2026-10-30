@@ -3,6 +3,7 @@ package io.github.glint.http.websocket;
 import io.github.glint.http.HttpRequest;
 
 import java.io.BufferedInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.EOFException;
 import java.io.IOException;
 import java.io.OutputStream;
@@ -17,18 +18,21 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * HTTP/1.1 {@code Upgrade: websocket} handshake and frame pump for Glint.
  *
- * <p>Supports text, binary, ping/pong, and close frames with status codes.
- * Fragmented messages and extensions are intentionally out of scope for 0.1.
+ * <p>Supports text, binary, ping/pong, close frames, and fragmented messages
+ * (continuation frames) per RFC 6455.
  */
 public final class WebSocketSupport {
 
     /** RFC 6455 magic GUID. */
     public static final String MAGIC = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
+    /** Soft cap for reassembled fragmented messages (16 MiB). */
+    private static final int MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
+
     private WebSocketSupport() {
     }
 
-    /** Registry of path → handler installed by {@link io.github.glint.Glint}. */
+    /** Registry of path -> handler installed by {@link io.github.glint.Glint}. */
     public static final class Registry {
         private final Map<String, WebSocketHandler> routes = new ConcurrentHashMap<>();
 
@@ -71,7 +75,7 @@ public final class WebSocketSupport {
 
     /**
      * Write the {@code 101 Switching Protocols} response.
-     * Does not close the streams  -  the caller enters the frame loop next.
+     * Does not close the streams - the caller enters the frame loop next.
      */
     public static void writeHandshake(OutputStream out, HttpRequest req) throws IOException {
         String key = req.header("sec-websocket-key").orElseThrow();
@@ -119,6 +123,9 @@ public final class WebSocketSupport {
     static void pump(WebSocketSession session, WebSocketHandler handler) throws Exception {
         BufferedInputStream in = session.input();
         OutputStream out = session.output();
+        ByteArrayOutputStream fragments = null;
+        int fragmentOpcode = -1;
+
         while (session.isOpen()) {
             WebSocketFrames.Frame frame;
             try {
@@ -126,39 +133,89 @@ public final class WebSocketSupport {
             } catch (EOFException eof) {
                 break;
             }
-            switch (frame.opcode()) {
-                case WebSocketFrames.OPCODE_TEXT -> handler.onMessage(session, frame.text());
-                case WebSocketFrames.OPCODE_BINARY -> handler.onBinary(session, frame.payload());
-                case WebSocketFrames.OPCODE_PING -> {
-                    // Auto-reply with pong (RFC 6455 §5.5.2), then notify the app.
-                    synchronized (out) {
-                        WebSocketFrames.write(out, WebSocketFrames.OPCODE_PONG, frame.payload(), false);
-                        out.flush();
-                    }
-                    handler.onPing(session, frame.payload());
+            int opcode = frame.opcode();
+
+            // Control frames may arrive between data fragments and must not be fragmented.
+            if (opcode == WebSocketFrames.OPCODE_PING) {
+                synchronized (out) {
+                    WebSocketFrames.write(out, WebSocketFrames.OPCODE_PONG, frame.payload(), false);
+                    out.flush();
                 }
-                case WebSocketFrames.OPCODE_PONG -> handler.onPong(session, frame.payload());
-                case WebSocketFrames.OPCODE_CLOSE -> {
-                    int code = 1000;
-                    String reason = "";
-                    byte[] payload = frame.payload();
-                    if (payload.length >= 2) {
-                        code = ((payload[0] & 0xFF) << 8) | (payload[1] & 0xFF);
-                        if (payload.length > 2) {
-                            reason = new String(payload, 2, payload.length - 2, StandardCharsets.UTF_8);
-                        }
+                handler.onPing(session, frame.payload());
+                continue;
+            }
+            if (opcode == WebSocketFrames.OPCODE_PONG) {
+                handler.onPong(session, frame.payload());
+                continue;
+            }
+            if (opcode == WebSocketFrames.OPCODE_CLOSE) {
+                int code = 1000;
+                String reason = "";
+                byte[] payload = frame.payload();
+                if (payload.length >= 2) {
+                    code = ((payload[0] & 0xFF) << 8) | (payload[1] & 0xFF);
+                    if (payload.length > 2) {
+                        reason = new String(payload, 2, payload.length - 2, StandardCharsets.UTF_8);
                     }
-                    session.recordPeerClose(code, reason);
-                    // Echo a close frame back if still open (RFC 6455 §5.5.1).
-                    if (session.isOpen()) {
-                        session.close(code, reason.isEmpty() ? "ack" : reason);
-                    }
+                }
+                session.recordPeerClose(code, reason);
+                if (session.isOpen()) {
+                    session.close(code, reason.isEmpty() ? "ack" : reason);
+                }
+                return;
+            }
+
+            if (opcode == WebSocketFrames.OPCODE_CONTINUATION) {
+                if (fragments == null || fragmentOpcode < 0) {
+                    session.close(1002, "unexpected continuation");
                     return;
                 }
-                default -> {
-                    // ignore continuation / reserved for 0.1
+                appendFragment(fragments, frame.payload());
+                if (frame.fin()) {
+                    deliver(session, handler, fragmentOpcode, fragments.toByteArray());
+                    fragments = null;
+                    fragmentOpcode = -1;
                 }
+                continue;
             }
+
+            if (opcode == WebSocketFrames.OPCODE_TEXT || opcode == WebSocketFrames.OPCODE_BINARY) {
+                if (fragments != null) {
+                    session.close(1002, "incomplete fragmented message");
+                    return;
+                }
+                if (!frame.fin()) {
+                    fragments = new ByteArrayOutputStream();
+                    fragmentOpcode = opcode;
+                    appendFragment(fragments, frame.payload());
+                    continue;
+                }
+                deliver(session, handler, opcode, frame.payload());
+                continue;
+            }
+
+            // Reserved / unknown data opcodes
+            session.close(1002, "unsupported opcode");
+            return;
+        }
+    }
+
+    private static void appendFragment(ByteArrayOutputStream fragments, byte[] payload) throws IOException {
+        if (payload == null || payload.length == 0) {
+            return;
+        }
+        if (fragments.size() + payload.length > MAX_MESSAGE_BYTES) {
+            throw new IOException("fragmented WebSocket message too large");
+        }
+        fragments.write(payload);
+    }
+
+    private static void deliver(WebSocketSession session, WebSocketHandler handler, int opcode, byte[] data)
+            throws Exception {
+        if (opcode == WebSocketFrames.OPCODE_TEXT) {
+            handler.onMessage(session, new String(data, StandardCharsets.UTF_8));
+        } else {
+            handler.onBinary(session, data);
         }
     }
 
@@ -166,6 +223,6 @@ public final class WebSocketSupport {
     @Deprecated
     public static void unsupported() {
         throw new UnsupportedOperationException(
-                "Use Glint.websocket(path, handler)  -  WebSocket upgrade is implemented.");
+                "Use Glint.websocket(path, handler) - WebSocket upgrade is implemented.");
     }
 }

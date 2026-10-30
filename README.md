@@ -48,7 +48,7 @@ cd ..\glint-demo
 
 | Module | Description |
 |--------|-------------|
-| `glint-core` | HTTP parser (Content-Length + chunked + **multipart**), VT server, router, middleware, Trace, Metrics, PinningWatcher, OTLP JSON export hooks (**zero** third-party deps) |
+| `glint-core` | HTTP parser (Content-Length + chunked + **multipart**), static mounts, VT server, router, middleware (CORS/accessLog/rateLimit), Trace, Metrics, PinningWatcher, OTLP JSON export hooks (**zero** third-party deps) |
 | `glint-dashboard` | Modern dark `/_vt` UI |
 | `glint-servlet` | Jakarta Servlet 6 adapter (sessions, multipart `Part`s, async stub) |
 | `glint-spring-boot-starter` | Drop-in Tomcat replacement |
@@ -87,15 +87,43 @@ Bundled entry point with a real `main`: `io.github.glint.examples.StandaloneDemo
 ## HTTP features (0.1+)
 
 - Methods: GET, HEAD, POST, PUT, DELETE, PATCH, OPTIONS
-- Query string, path params `{id}`
+- Query string, path params `{id}`, greedy `{*path}`
 - Bodies: `Content-Length`, **chunked**, **`multipart/form-data`** (size-limited)
+- **Static mounts**: `Glint.staticFiles(prefix, Path)` and `classpathFiles(prefix, root)` with MIME, HEAD, basic `Range`, path-traversal checks
 - Limits / idle timeout / **fast graceful shutdown** (force-closes keep-alive sockets)
 - Optional **TLS** via `ServerConfig.builder().sslContext(SSLContext)`
 - Diagnostics: `/_vt`, metrics, slow, pinning, **`/_vt/api/otlp/v1/metrics`** (OTLP/HTTP JSON, no SDK dep)
 - ObsExporter SPI (`ServiceLoader`) for custom exporters
-- Middleware: CORS, request logging, exception  - JSON
+- Middleware: **CORS** (`CorsOptions`), **accessLog** / `requestLogging`, **token-bucket rateLimit**, exception -> JSON
 - Cookies: multiple **`Set-Cookie`** header lines (`resp.cookie(...)` / `addCookie`)
-- WebSocket / HTTP Upgrade via `Glint.websocket(path, handler)` (RFC 6455, HTTP/1.1): **text**, **binary**, **ping/pong** (auto-reply), **close codes**
+- WebSocket / HTTP Upgrade via `Glint.websocket(path, handler)` (RFC 6455, HTTP/1.1): **text**, **binary**, **ping/pong** (auto-reply), **close codes**, **fragmented message reassembly**
+
+### Static files + middleware (complete `main`)
+
+```java
+import io.github.glint.Glint;
+import io.github.glint.middleware.CorsOptions;
+import io.github.glint.middleware.Middlewares;
+import java.nio.file.Path;
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        Glint.create(8080)
+            .before(Middlewares.accessLog())
+            .before(Middlewares.cors(CorsOptions.builder()
+                .allowOrigin("*")
+                .exposeHeaders("Content-Range")
+                .build()))
+            .before(Middlewares.rateLimit(100, 50))
+            .staticFiles("/assets", Path.of("public"))
+            .classpathFiles("/web", "static/web")
+            .get("/hello", (req, resp) -> resp.text("ok"))
+            .diagnostics("/_vt")
+            .startAsync();
+        Thread.currentThread().join();
+    }
+}
+```
 
 ## Benchmarks
 
@@ -151,14 +179,16 @@ Requires **JDK 21+** and **Maven 3.9+**.
 - [x] Servlet adapter + Spring Boot starter (Hello World)
 - [ ] Full OTLP trace export / SDK bridge module
 - [x] Servlet sessions (`JSESSIONID`), multipart `Part`s, async `startAsync`/`complete` stub
-- [x] WebSocket HTTP/1.1 Upgrade: text, binary, ping/pong, close codes (`Glint.websocket`)
+- [x] WebSocket HTTP/1.1 Upgrade: text, binary, ping/pong, close codes, fragmented messages (Glint.websocket)
+- [x] Static file mounts (directory + classpath) with MIME / HEAD / Range
+- [x] Middleware helpers: CORS options, accessLog, token-bucket rateLimit
 - [x] Multi `Set-Cookie` header support (`HttpResponse.cookie`)
 - [ ] Published JMH vs Tomcat / Undertow / Jetty with CI numbers
 - [ ] GraalVM native-image recipe for standalone mode
 
 ## Out of scope (0.1)
 
-Full Servlet 6 surface, HTTP/2/3, fragmented WebSocket messages, DI/ORM frameworks.
+Full Servlet 6 surface, HTTP/2/3, DI/ORM frameworks.
 
 ## Contributing
 

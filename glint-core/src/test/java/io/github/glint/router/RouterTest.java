@@ -30,6 +30,16 @@ class RouterTest {
     }
 
     @Test
+    void greedyPathParamMatchesNestedSegments() {
+        Router router = new Router();
+        router.add(HttpMethod.GET, "/assets/{*path}", (req, resp) -> {});
+        HttpRequest req = new HttpRequest(HttpMethod.GET, "/assets/css/app.css", Map.of(), new byte[0]);
+        RouteHandler h = router.match(req);
+        assertNotNull(h);
+        assertEquals("css/app.css", req.pathParam("path"));
+    }
+
+    @Test
     void methodMustMatch() {
         Router router = new Router();
         router.add(HttpMethod.GET, "/hello", (req, resp) -> {});

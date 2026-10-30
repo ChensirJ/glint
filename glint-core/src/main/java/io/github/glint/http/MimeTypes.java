@@ -43,11 +43,26 @@ public final class MimeTypes {
         if (p.endsWith(".woff2")) {
             return "font/woff2";
         }
+        if (p.endsWith(".woff")) {
+            return "font/woff";
+        }
+        if (p.endsWith(".ttf")) {
+            return "font/ttf";
+        }
         if (p.endsWith(".map")) {
             return "application/json; charset=utf-8";
         }
-        if (p.endsWith(".txt")) {
+        if (p.endsWith(".txt") || p.endsWith(".log")) {
             return "text/plain; charset=utf-8";
+        }
+        if (p.endsWith(".wasm")) {
+            return "application/wasm";
+        }
+        if (p.endsWith(".xml")) {
+            return "application/xml; charset=utf-8";
+        }
+        if (p.endsWith(".pdf")) {
+            return "application/pdf";
         }
         return "application/octet-stream";
     }

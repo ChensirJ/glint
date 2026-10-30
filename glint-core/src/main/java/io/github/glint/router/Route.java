@@ -9,7 +9,8 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * A single HTTP route with optional path parameters such as {@code /users/{id}}.
+ * A single HTTP route with optional path parameters such as {@code /users/{id}}
+ * or greedy catch-alls such as {@code /assets/{*path}}.
  */
 public final class Route {
 
@@ -84,8 +85,21 @@ public final class Route {
                     throw new IllegalArgumentException("Unclosed path param in " + pattern);
                 }
                 String name = pattern.substring(i + 1, end);
-                names.add(name);
-                sb.append("([^/]+)");
+                boolean greedy = name.startsWith("*");
+                if (greedy) {
+                    name = name.substring(1);
+                    if (name.isEmpty()) {
+                        throw new IllegalArgumentException("Empty greedy path param in " + pattern);
+                    }
+                    names.add(name);
+                    sb.append("(.*)");
+                } else {
+                    if (name.isEmpty()) {
+                        throw new IllegalArgumentException("Empty path param in " + pattern);
+                    }
+                    names.add(name);
+                    sb.append("([^/]+)");
+                }
                 i = end + 1;
             } else {
                 if (isRegexSpecial(c)) {

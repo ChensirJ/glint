@@ -226,4 +226,52 @@ class WebSocketIntegrationTest {
         }
         out.flush();
     }
+
+    @Test
+    void fragmentedTextMessageIsReassembled() throws Exception {
+        AtomicReference<String> got = new AtomicReference<>();
+        CountDownLatch latch = new CountDownLatch(1);
+
+        glint = Glint.create(0)
+                .pinningWatcher(false)
+                .config(ServerConfig.builder().idleTimeoutMs(5_000).shutdownWaitMs(1_000).build())
+                .websocket("/ws/frag", (session, text) -> {
+                    got.set(text);
+                    session.sendText("got:" + text);
+                    latch.countDown();
+                })
+                .startAsync();
+
+        int port = glint.port();
+        String key = Base64.getEncoder().encodeToString("glint-frag-key-12".getBytes(StandardCharsets.US_ASCII));
+
+        try (Socket socket = new Socket("127.0.0.1", port)) {
+            socket.setSoTimeout(5_000);
+            OutputStream rawOut = new BufferedOutputStream(socket.getOutputStream());
+            InputStream rawIn = new BufferedInputStream(socket.getInputStream());
+            handshake(rawOut, rawIn, "/ws/frag", key);
+
+            // "Hello" as FIN=0 TEXT "He" + FIN=1 CONT "llo"
+            writeMaskedFin(rawOut, WebSocketFrames.OPCODE_TEXT, false, "He".getBytes(StandardCharsets.UTF_8));
+            writeMaskedFin(rawOut, WebSocketFrames.OPCODE_CONTINUATION, true, "llo".getBytes(StandardCharsets.UTF_8));
+
+            WebSocketFrames.Frame frame = WebSocketFrames.read(rawIn);
+            assertEquals(WebSocketFrames.OPCODE_TEXT, frame.opcode());
+            assertEquals("got:Hello", frame.text());
+        }
+
+        assertTrue(latch.await(3, TimeUnit.SECONDS));
+        assertEquals("Hello", got.get());
+    }
+
+    private static void writeMaskedFin(OutputStream out, int opcode, boolean fin, byte[] payload) throws Exception {
+        byte[] mask = new byte[]{0x11, 0x22, 0x33, 0x44};
+        out.write((fin ? 0x80 : 0x00) | (opcode & 0x0F));
+        out.write(0x80 | payload.length);
+        out.write(mask);
+        for (int i = 0; i < payload.length; i++) {
+            out.write(payload[i] ^ mask[i % 4]);
+        }
+        out.flush();
+    }
 }
