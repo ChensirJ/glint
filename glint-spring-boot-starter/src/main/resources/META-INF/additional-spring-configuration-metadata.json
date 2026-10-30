@@ -4,6 +4,34 @@
       "name": "glint",
       "type": "io.github.glint.spring.GlintProperties",
       "description": "Glint Spring Boot starter settings."
+    },
+    {
+      "name": "glint.static",
+      "type": "io.github.glint.spring.GlintProperties$StaticResources",
+      "sourceType": "io.github.glint.spring.GlintProperties",
+      "sourceMethod": "getStatic()",
+      "description": "Glint static file mount."
+    },
+    {
+      "name": "glint.access-log",
+      "type": "io.github.glint.spring.GlintProperties$AccessLog",
+      "sourceType": "io.github.glint.spring.GlintProperties",
+      "sourceMethod": "getAccessLog()",
+      "description": "Glint access log."
+    },
+    {
+      "name": "glint.cors",
+      "type": "io.github.glint.spring.GlintProperties$Cors",
+      "sourceType": "io.github.glint.spring.GlintProperties",
+      "sourceMethod": "getCors()",
+      "description": "Glint-level CORS."
+    },
+    {
+      "name": "glint.rate-limit",
+      "type": "io.github.glint.spring.GlintProperties$RateLimit",
+      "sourceType": "io.github.glint.spring.GlintProperties",
+      "sourceMethod": "getRateLimit()",
+      "description": "Glint per-IP rate limit."
     }
   ],
   "properties": [
@@ -12,7 +40,163 @@
       "type": "java.lang.Boolean",
       "description": "Mount the /_vt diagnostics dashboard and related JSON APIs. Virtual threads are always enabled for accepted connections.",
       "defaultValue": true
+    },
+    {
+      "name": "glint.static.enabled",
+      "type": "java.lang.Boolean",
+      "description": "Serve static files directly from Glint, before the servlet filter chain and Spring MVC.",
+      "defaultValue": false
+    },
+    {
+      "name": "glint.static.prefix",
+      "type": "java.lang.String",
+      "description": "URL prefix of the static mount, for example /assets.",
+      "defaultValue": "/static"
+    },
+    {
+      "name": "glint.static.location",
+      "type": "java.lang.String",
+      "description": "Directory path, or classpath:some/root for classpath resources. Required when glint.static.enabled=true."
+    },
+    {
+      "name": "glint.static.cache-max-entry-bytes",
+      "type": "java.lang.Integer",
+      "description": "Files up to this size are cached in memory (0 disables the cache). Directory mounts only.",
+      "defaultValue": 262144
+    },
+    {
+      "name": "glint.static.cache-max-total-bytes",
+      "type": "java.lang.Long",
+      "description": "Upper bound for cached bytes of the mount. Directory mounts only.",
+      "defaultValue": 67108864
+    },
+    {
+      "name": "glint.static.revalidate-millis",
+      "type": "java.lang.Long",
+      "description": "How long cached file metadata is trusted before re-checking the filesystem. Directory mounts only.",
+      "defaultValue": 1000
+    },
+    {
+      "name": "glint.static.cache-control",
+      "type": "java.lang.String",
+      "description": "Cache-Control header for non-fingerprinted files (fingerprinted names get immutable caching); unset sends none. Directory mounts only."
+    },
+    {
+      "name": "glint.static.precompressed",
+      "type": "java.lang.Boolean",
+      "description": "Serve precompressed .br / .gz siblings when the client accepts them. Directory mounts only.",
+      "defaultValue": true
+    },
+    {
+      "name": "glint.static.directory-listing",
+      "type": "java.lang.Boolean",
+      "description": "Render an HTML/JSON listing for directories without index.html. Directory mounts only.",
+      "defaultValue": false
+    },
+    {
+      "name": "glint.access-log.enabled",
+      "type": "java.lang.Boolean",
+      "description": "Write one access log line per request to stdout.",
+      "defaultValue": false
+    },
+    {
+      "name": "glint.access-log.format",
+      "type": "io.github.glint.spring.GlintProperties$AccessLogFormat",
+      "description": "Access log format: text or json (JSON Lines).",
+      "defaultValue": "text"
+    },
+    {
+      "name": "glint.cors.enabled",
+      "type": "java.lang.Boolean",
+      "description": "Apply Glint-level CORS headers to every response, including static files and diagnostics.",
+      "defaultValue": false
+    },
+    {
+      "name": "glint.cors.allowed-origin",
+      "type": "java.lang.String",
+      "description": "Access-Control-Allow-Origin value: * or one exact origin.",
+      "defaultValue": "*"
+    },
+    {
+      "name": "glint.cors.allowed-methods",
+      "type": "java.util.List<java.lang.String>",
+      "description": "Access-Control-Allow-Methods for preflight responses.",
+      "defaultValue": [
+        "GET",
+        "POST",
+        "PUT",
+        "DELETE",
+        "PATCH",
+        "HEAD",
+        "OPTIONS"
+      ]
+    },
+    {
+      "name": "glint.cors.allowed-headers",
+      "type": "java.util.List<java.lang.String>",
+      "description": "Access-Control-Allow-Headers for preflight responses.",
+      "defaultValue": [
+        "Content-Type",
+        "Authorization",
+        "X-Requested-With",
+        "Range"
+      ]
+    },
+    {
+      "name": "glint.cors.exposed-headers",
+      "type": "java.util.List<java.lang.String>",
+      "description": "Access-Control-Expose-Headers on actual responses."
+    },
+    {
+      "name": "glint.cors.allow-credentials",
+      "type": "java.lang.Boolean",
+      "description": "Send Access-Control-Allow-Credentials: true.",
+      "defaultValue": false
+    },
+    {
+      "name": "glint.cors.max-age-seconds",
+      "type": "java.lang.Integer",
+      "description": "Access-Control-Max-Age for preflight responses.",
+      "defaultValue": 86400
+    },
+    {
+      "name": "glint.cors.short-circuit-options",
+      "type": "java.lang.Boolean",
+      "description": "Answer preflight OPTIONS requests with 204 without reaching Spring.",
+      "defaultValue": true
+    },
+    {
+      "name": "glint.rate-limit.enabled",
+      "type": "java.lang.Boolean",
+      "description": "Per-client-IP token bucket; excess requests get 429 with Retry-After. /_vt diagnostics are exempt.",
+      "defaultValue": false
+    },
+    {
+      "name": "glint.rate-limit.permits-per-second",
+      "type": "java.lang.Double",
+      "description": "Sustained refill rate per client IP.",
+      "defaultValue": 100
+    },
+    {
+      "name": "glint.rate-limit.burst",
+      "type": "java.lang.Integer",
+      "description": "Bucket capacity per client IP.",
+      "defaultValue": 50
     }
   ],
-  "hints": []
+  "hints": [
+    {
+      "name": "glint.access-log.format",
+      "values": [
+        {
+          "value": "text",
+          "description": "METHOD path -> status (ms)"
+        },
+        {
+          "value": "json",
+          "description": "JSON Lines with ts, method, path, status, durationMs, bytes, remote"
+        }
+      ]
+    }
+  ]
 }

@@ -24,7 +24,10 @@ import org.springframework.context.annotation.Bean;
  *
  * <p>Listen port comes from Spring Boot's standard {@code server.port}
  * (default {@code 8080}). Glint-specific knobs live under {@code glint.*}
- * ({@link GlintProperties}). See {@code docs/spring-boot.md} for the full
+ * ({@link GlintProperties}): diagnostics, static mount, access log, CORS, and
+ * rate limit. Servlet filters registered by Spring (including
+ * {@code FilterRegistrationBean} and {@code @Bean Filter}) run before
+ * {@code DispatcherServlet}. See {@code docs/spring-boot.md} for the full
  * property reference.
  */
 @AutoConfiguration(before = ServletWebServerFactoryAutoConfiguration.class)
@@ -35,8 +38,6 @@ public class GlintServerAutoConfiguration {
     @Bean
     @ConditionalOnMissingBean
     public ServletWebServerFactory glintServletWebServerFactory(GlintProperties properties) {
-        GlintServletWebServerFactory factory = new GlintServletWebServerFactory();
-        factory.setDiagnostics(properties.isDiagnostics());
-        return factory;
+        return new GlintServletWebServerFactory(properties);
     }
 }
