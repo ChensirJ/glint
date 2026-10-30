@@ -55,6 +55,32 @@ final class ContentLengthInputStream extends InputStream {
         return n;
     }
 
+    /**
+     * Read the rest of the body into one exactly-sized array (the default
+     * implementation grows a list of 8 KiB chunks and copies them again).
+     */
+    @Override
+    public byte[] readAllBytes() throws IOException {
+        ensureOpen();
+        if (remaining <= 0) {
+            return new byte[0];
+        }
+        if (remaining > Integer.MAX_VALUE - 8) {
+            return super.readAllBytes();
+        }
+        byte[] out = new byte[(int) remaining];
+        int off = 0;
+        while (off < out.length) {
+            int n = in.read(out, off, out.length - off);
+            if (n < 0) {
+                throw new EOFException("Unexpected EOF in body");
+            }
+            off += n;
+            remaining -= n;
+        }
+        return out;
+    }
+
     @Override
     public long skip(long n) throws IOException {
         ensureOpen();

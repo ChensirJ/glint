@@ -49,6 +49,7 @@ public final class VtServer implements AutoCloseable {
     private final AtomicInteger inFlight = new AtomicInteger(0);
     private final Set<Socket> openSockets = ConcurrentHashMap.newKeySet();
     private Thread acceptor;
+    private volatile boolean timerAcquired;
 
     public VtServer(int port, RouteHandler handler) throws IOException {
         this(port, handler, ServerConfig.defaults(), null);
@@ -72,7 +73,7 @@ public final class VtServer implements AutoCloseable {
             SSLServerSocketFactory factory = config.sslContext().getServerSocketFactory();
             SSLServerSocket ssl = (SSLServerSocket) factory.createServerSocket();
             ssl.setReuseAddress(true);
-            ssl.bind(new InetSocketAddress(port), config.backlog());
+            ssl.bind(new InetSocketAddress(config.bindAddress(), port), config.backlog());
             ss = ssl;
         } else {
             // Open through NIO so accepted sockets expose a SocketChannel: static files can
@@ -80,7 +81,7 @@ public final class VtServer implements AutoCloseable {
             // socket adaptor keeps the blocking stream API used by the rest of the server.
             ss = ServerSocketChannel.open().socket();
             ss.setReuseAddress(true);
-            ss.bind(new InetSocketAddress(port), config.backlog());
+            ss.bind(new InetSocketAddress(config.bindAddress(), port), config.backlog());
         }
         return ss;
     }
@@ -95,6 +96,9 @@ public final class VtServer implements AutoCloseable {
     }
 
     public void start() {
+        if (config.highResolutionTimer()) {
+            timerAcquired = HighResolutionTimer.acquire();
+        }
         acceptor = Thread.ofPlatform().name("glint-acceptor").start(() -> {
             while (running.get()) {
                 try {
@@ -242,6 +246,10 @@ public final class VtServer implements AutoCloseable {
     @Override
     public void close() throws IOException {
         running.set(false);
+        if (timerAcquired) {
+            timerAcquired = false;
+            HighResolutionTimer.release();
+        }
         try {
             serverSocket.close();
         } catch (IOException ignored) {

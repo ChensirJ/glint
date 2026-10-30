@@ -1,6 +1,8 @@
 package io.github.glint.http;
 
 import javax.net.ssl.SSLContext;
+import java.net.InetAddress;
+import java.net.InetAddress;
 
 /**
  * Tunables for {@link VtServer}. All fields have safe defaults for demos;
@@ -27,8 +29,12 @@ public final class ServerConfig {
     private final int maxMultipartParts;
     private final int maxMultipartPartBytes;
     private final SSLContext sslContext;
+    private final InetAddress bindAddress;
+    private final boolean highResolutionTimer;
 
     private ServerConfig(Builder b) {
+        this.bindAddress = b.bindAddress;
+        this.highResolutionTimer = b.highResolutionTimer;
         this.maxRequestBodyBytes = b.maxRequestBodyBytes;
         this.maxHeaderLineBytes = b.maxHeaderLineBytes;
         this.idleTimeoutMs = b.idleTimeoutMs;
@@ -84,6 +90,19 @@ public final class ServerConfig {
         return sslContext != null;
     }
 
+    /** Local address to bind, or {@code null} for all interfaces (the default). */
+    public InetAddress bindAddress() {
+        return bindAddress;
+    }
+
+    /**
+     * Whether the server keeps the Windows timer at 1 ms resolution while running
+     * (default true; no effect on other operating systems). See {@link HighResolutionTimer}.
+     */
+    public boolean highResolutionTimer() {
+        return highResolutionTimer;
+    }
+
     public static final class Builder {
         private int maxRequestBodyBytes = DEFAULT_MAX_REQUEST_BODY;
         private int maxHeaderLineBytes = DEFAULT_MAX_HEADER_LINE;
@@ -93,6 +112,24 @@ public final class ServerConfig {
         private int maxMultipartParts = DEFAULT_MAX_MULTIPART_PARTS;
         private int maxMultipartPartBytes = DEFAULT_MAX_MULTIPART_PART_BYTES;
         private SSLContext sslContext;
+        private InetAddress bindAddress;
+        private boolean highResolutionTimer = true;
+
+        /** Bind to one local address instead of all interfaces ({@code null} = all). */
+        public Builder bindAddress(InetAddress address) {
+            this.bindAddress = address;
+            return this;
+        }
+
+        /**
+         * Keep the Windows timer at 1 ms resolution while the server runs so
+         * virtual-thread sleeps and timeouts are not rounded up to 15.6 ms ticks.
+         * Default true; ignored on other operating systems.
+         */
+        public Builder highResolutionTimer(boolean enabled) {
+            this.highResolutionTimer = enabled;
+            return this;
+        }
 
         public Builder maxRequestBodyBytes(int v) {
             this.maxRequestBodyBytes = v;

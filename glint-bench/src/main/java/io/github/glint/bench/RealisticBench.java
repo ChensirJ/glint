@@ -547,6 +547,11 @@ public final class RealisticBench {
             List<String> cmd = new ArrayList<>();
             cmd.add(java);
             cmd.addAll(List.of(JVM_FLAGS));
+            // -Dglint.bench.serverFlags="..." adds server JVM flags (for example JFR) to both sides.
+            String extra = System.getProperty("glint.bench.serverFlags", "").trim();
+            if (!extra.isEmpty()) {
+                cmd.addAll(List.of(extra.replace("{kind}", kind).split("\\s+")));
+            }
             cmd.add("-cp");
             cmd.add(System.getProperty("java.class.path"));
             cmd.add(RealisticServer.class.getName());
@@ -746,7 +751,8 @@ public final class RealisticBench {
                 .append("simulated waits use Thread.sleep, and on Windows JDK 21 virtual-thread timed sleeps are ")
                 .append("coarser under load than platform-thread sleeps, which penalizes Glint in sleep-heavy cells.\n");
 
-        Path out = Path.of("docs", "bench-results.md");
+        // -Dglint.bench.out=<file> writes elsewhere (for before/after captures).
+        Path out = Path.of(System.getProperty("glint.bench.out", "docs/bench-results.md"));
         String existing = Files.exists(out) ? Files.readString(out) : "# Glint benchmarks\n";
         int cut = existing.indexOf("\n## Realistic suite");
         String previousSection = cut >= 0 ? existing.substring(cut + 1) : "";
