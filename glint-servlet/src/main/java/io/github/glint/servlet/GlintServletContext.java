@@ -1,6 +1,8 @@
 package io.github.glint.servlet;
 
+import jakarta.servlet.DispatcherType;
 import jakarta.servlet.Filter;
+import jakarta.servlet.FilterConfig;
 import jakarta.servlet.FilterRegistration;
 import jakarta.servlet.RequestDispatcher;
 import jakarta.servlet.Servlet;
@@ -13,40 +15,97 @@ import jakarta.servlet.descriptor.JspConfigDescriptor;
 
 import java.io.InputStream;
 import java.net.URL;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.EnumSet;
 import java.util.Enumeration;
-import java.util.List;
 import java.util.EventListener;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
 /**
- * Minimal {@link ServletContext} that records servlet registrations so the
- * Spring Boot factory can dispatch to {@code DispatcherServlet}.
+ * Minimal {@link ServletContext} that records servlet and filter registrations
+ * so the Spring Boot factory can dispatch to {@code DispatcherServlet} through
+ * the registered filter chain.
  */
 public final class GlintServletContext implements ServletContext {
 
     private final Map<String, String> initParams = new HashMap<>();
     private final Map<String, Object> attributes = new HashMap<>();
-    private final Map<String, Servlet> servletsByName = new HashMap<>();
-    private final Map<String, String> mappings = new HashMap<>();
-    private final Map<String, Filter> filtersByName = new HashMap<>();
+    private final Map<String, Servlet> servletsByName = new LinkedHashMap<>();
+    private final Map<String, String> mappings = new LinkedHashMap<>();
+    /** Filters in registration order. */
+    private final Map<String, FilterReg> filtersByName = new LinkedHashMap<>();
+    /**
+     * Filter mappings in effective order: mappings added with
+     * {@code isMatchAfter=false} first (registration order), then those added with
+     * {@code isMatchAfter=true}.
+     */
+    private final List<FilterMapping> beforeMappings = new ArrayList<>();
+    private final List<FilterMapping> afterMappings = new ArrayList<>();
     private final ClassLoader classLoader = Thread.currentThread().getContextClassLoader();
+    private boolean initialized;
+
+    /** One URL-pattern or servlet-name mapping for a filter. */
+    record FilterMapping(String filterName, String urlPattern, String servletName,
+                         EnumSet<DispatcherType> dispatcherTypes) {
+        boolean matches(String path, String targetServlet, DispatcherType type) {
+            if (!dispatcherTypes.contains(type)) {
+                return false;
+            }
+            if (servletName != null) {
+                return "*".equals(servletName) || servletName.equals(targetServlet);
+            }
+            return urlPatternMatches(urlPattern, path);
+        }
+    }
+
+    /**
+     * Servlet spec URL-pattern matching: exact, {@code /prefix/*}, {@code *.ext},
+     * and {@code /} (default, matches everything).
+     */
+    static boolean urlPatternMatches(String pattern, String path) {
+        if (pattern == null || path == null) {
+            return false;
+        }
+        if (pattern.equals("/*") || pattern.equals("/")) {
+            return true;
+        }
+        if (pattern.endsWith("/*")) {
+            String prefix = pattern.substring(0, pattern.length() - 2);
+            return path.equals(prefix) || path.startsWith(prefix + "/");
+        }
+        if (pattern.startsWith("*.")) {
+            return path.endsWith(pattern.substring(1));
+        }
+        return pattern.equals(path);
+    }
 
     public Servlet findServletForPath(String path) {
+        String name = findServletNameForPath(path);
+        return name == null ? null : servletsByName.get(name);
+    }
+
+    /** Name of the servlet that handles {@code path}, or {@code null}. */
+    public String findServletNameForPath(String path) {
         // Prefer exact mapping, then "/*" / default.
         String name = mappings.get(path);
         if (name == null) {
             name = mappings.get("/*");
         }
+        if (name == null) {
+            name = mappings.get("/");
+        }
         if (name == null && !mappings.isEmpty()) {
             name = mappings.values().iterator().next();
         }
-        return name == null ? null : servletsByName.get(name);
+        return name;
     }
 
     public Map<String, Servlet> servlets() {
@@ -54,17 +113,80 @@ public final class GlintServletContext implements ServletContext {
     }
 
     /**
-     * Initialize every registered servlet (Spring Boot expects the container to
-     * call {@link Servlet#init} after {@code ServletContextInitializer}s run).
+     * Filters that apply to a request for {@code path} dispatched to
+     * {@code servletName}, in execution order. A filter appears at most once.
      */
-    public void initServlets() throws ServletException {
-        for (Map.Entry<String, Servlet> e : servletsByName.entrySet()) {
-            String name = e.getKey();
-            Servlet servlet = e.getValue();
-            if (servlet.getServletConfig() != null) {
-                continue;
+    public List<Filter> filtersFor(String path, String servletName, DispatcherType type) {
+        if (filtersByName.isEmpty()) {
+            return List.of();
+        }
+        Set<String> names = new LinkedHashSet<>();
+        // Servlet spec: URL-pattern mappings first, then servlet-name mappings.
+        collect(names, beforeMappings, path, servletName, type, true);
+        collect(names, afterMappings, path, servletName, type, true);
+        collect(names, beforeMappings, path, servletName, type, false);
+        collect(names, afterMappings, path, servletName, type, false);
+        List<Filter> out = new ArrayList<>(names.size());
+        for (String n : names) {
+            FilterReg reg = filtersByName.get(n);
+            if (reg != null) {
+                out.add(reg.filter);
             }
-            servlet.init(new SimpleServletConfig(name));
+        }
+        return out;
+    }
+
+    private static void collect(Set<String> names, List<FilterMapping> mappings, String path,
+                                String servletName, DispatcherType type, boolean urlPatterns) {
+        for (FilterMapping m : mappings) {
+            if ((m.urlPattern() != null) == urlPatterns && m.matches(path, servletName, type)) {
+                names.add(m.filterName());
+            }
+        }
+    }
+
+    /**
+     * Initialize every registered filter and servlet. Spring Boot expects the
+     * container to call {@link Filter#init} / {@link Servlet#init} after
+     * {@code ServletContextInitializer}s run. Idempotent.
+     */
+    public void initialize() throws ServletException {
+        if (initialized) {
+            return;
+        }
+        initialized = true;
+        for (FilterReg reg : filtersByName.values()) {
+            reg.filter.init(reg);
+        }
+        for (Map.Entry<String, Servlet> e : servletsByName.entrySet()) {
+            Servlet servlet = e.getValue();
+            if (servlet.getServletConfig() == null) {
+                servlet.init(new SimpleServletConfig(e.getKey()));
+            }
+        }
+    }
+
+    /** @deprecated use {@link #initialize()}, which also initializes filters. */
+    @Deprecated
+    public void initServlets() throws ServletException {
+        initialize();
+    }
+
+    /** Call {@code destroy()} on filters and servlets (best effort). */
+    public void destroy() {
+        for (FilterReg reg : filtersByName.values()) {
+            try {
+                reg.filter.destroy();
+            } catch (RuntimeException ignored) {
+                // keep shutting down the rest
+            }
+        }
+        for (Servlet s : servletsByName.values()) {
+            try {
+                s.destroy();
+            } catch (RuntimeException ignored) {
+                // keep shutting down the rest
+            }
         }
     }
 
@@ -113,7 +235,12 @@ public final class GlintServletContext implements ServletContext {
     @Override public void removeAttribute(String name) { attributes.remove(name); }
     @Override public String getServletContextName() { return "glint"; }
     @Override public ServletRegistration.Dynamic addServlet(String servletName, String className) {
-        throw new UnsupportedOperationException("addServlet(className)");
+        try {
+            Class<?> c = classLoader.loadClass(className);
+            return addServlet(servletName, (Servlet) c.getDeclaredConstructor().newInstance());
+        } catch (Exception e) {
+            throw new IllegalArgumentException("Cannot instantiate servlet " + className, e);
+        }
     }
     @Override public ServletRegistration.Dynamic addServlet(String servletName, Servlet servlet) {
         servletsByName.put(servletName, servlet);
@@ -144,24 +271,28 @@ public final class GlintServletContext implements ServletContext {
         }
         return m;
     }
+
     @Override
     public FilterRegistration.Dynamic addFilter(String filterName, String className) {
         try {
             Class<?> c = classLoader.loadClass(className);
-            Filter filter = (Filter) c.getDeclaredConstructor().newInstance();
-            return addFilter(filterName, filter);
+            return addFilter(filterName, (Filter) c.getDeclaredConstructor().newInstance());
         } catch (Exception e) {
-            throw new RuntimeException(e);
+            throw new IllegalArgumentException("Cannot instantiate filter " + className, e);
         }
     }
 
     @Override
     public FilterRegistration.Dynamic addFilter(String filterName, Filter filter) {
-        if (filtersByName.containsKey(filterName)) {
-            return null; // already registered
+        if (filterName == null || filterName.isEmpty()) {
+            throw new IllegalArgumentException("filterName must not be empty");
         }
-        filtersByName.put(filterName, filter);
-        return new FilterReg(filterName);
+        if (filtersByName.containsKey(filterName)) {
+            return null; // servlet spec: already registered
+        }
+        FilterReg reg = new FilterReg(filterName, filter);
+        filtersByName.put(filterName, reg);
+        return reg;
     }
 
     @Override
@@ -169,7 +300,7 @@ public final class GlintServletContext implements ServletContext {
         try {
             return addFilter(filterName, filterClass.getDeclaredConstructor().newInstance());
         } catch (Exception e) {
-            throw new RuntimeException(e);
+            throw new IllegalArgumentException("Cannot instantiate filter " + filterClass, e);
         }
     }
 
@@ -184,17 +315,14 @@ public final class GlintServletContext implements ServletContext {
 
     @Override
     public FilterRegistration getFilterRegistration(String filterName) {
-        return filtersByName.containsKey(filterName) ? new FilterReg(filterName) : null;
+        return filtersByName.get(filterName);
     }
 
     @Override
     public Map<String, ? extends FilterRegistration> getFilterRegistrations() {
-        Map<String, FilterRegistration> m = new HashMap<>();
-        for (String n : filtersByName.keySet()) {
-            m.put(n, new FilterReg(n));
-        }
-        return m;
+        return Collections.unmodifiableMap(filtersByName);
     }
+
     @Override public SessionCookieConfig getSessionCookieConfig() { return null; }
     @Override public void setSessionTrackingModes(Set<SessionTrackingMode> sessionTrackingModes) { }
     @Override public Set<SessionTrackingMode> getDefaultSessionTrackingModes() { return Set.of(); }
@@ -252,32 +380,89 @@ public final class GlintServletContext implements ServletContext {
         @Override public Set<String> setServletSecurity(jakarta.servlet.ServletSecurityElement constraint) { return Set.of(); }
     }
 
-    /**
-     * Records filter registrations so Spring Boot startup succeeds.
-     * Filter chain invocation is not yet implemented in the dispatcher.
-     */
-    private final class FilterReg implements FilterRegistration.Dynamic {
+    /** Filter registration that also serves as the filter's {@link FilterConfig}. */
+    private final class FilterReg implements FilterRegistration.Dynamic, FilterConfig {
         private final String name;
-        private final Map<String, String> initParameters = new HashMap<>();
-        private FilterReg(String name) { this.name = name; }
-        @Override public void addMappingForServletNames(EnumSet<jakarta.servlet.DispatcherType> dispatcherTypes,
-                                                        boolean isMatchAfter, String... servletNames) { }
-        @Override public Collection<String> getServletNameMappings() { return List.of(); }
-        @Override public void addMappingForUrlPatterns(EnumSet<jakarta.servlet.DispatcherType> dispatcherTypes,
-                                                       boolean isMatchAfter, String... urlPatterns) { }
-        @Override public Collection<String> getUrlPatternMappings() { return List.of(); }
+        private final Filter filter;
+        private final Map<String, String> initParameters = new LinkedHashMap<>();
+
+        private FilterReg(String name, Filter filter) {
+            this.name = name;
+            this.filter = filter;
+        }
+
+        private void addMappings(EnumSet<DispatcherType> types, boolean isMatchAfter,
+                                 String[] urlPatterns, String[] servletNames) {
+            EnumSet<DispatcherType> t = types == null || types.isEmpty()
+                    ? EnumSet.of(DispatcherType.REQUEST)
+                    : EnumSet.copyOf(types);
+            List<FilterMapping> target = isMatchAfter ? afterMappings : beforeMappings;
+            if (urlPatterns != null) {
+                for (String p : urlPatterns) {
+                    target.add(new FilterMapping(name, p, null, t));
+                }
+            }
+            if (servletNames != null) {
+                for (String s : servletNames) {
+                    target.add(new FilterMapping(name, null, s, t));
+                }
+            }
+        }
+
+        @Override
+        public void addMappingForServletNames(EnumSet<DispatcherType> dispatcherTypes,
+                                              boolean isMatchAfter, String... servletNames) {
+            addMappings(dispatcherTypes, isMatchAfter, null, servletNames);
+        }
+
+        @Override
+        public Collection<String> getServletNameMappings() {
+            List<String> out = new ArrayList<>();
+            for (FilterMapping m : allMappings()) {
+                if (name.equals(m.filterName()) && m.servletName() != null) {
+                    out.add(m.servletName());
+                }
+            }
+            return out;
+        }
+
+        @Override
+        public void addMappingForUrlPatterns(EnumSet<DispatcherType> dispatcherTypes,
+                                             boolean isMatchAfter, String... urlPatterns) {
+            addMappings(dispatcherTypes, isMatchAfter, urlPatterns, null);
+        }
+
+        @Override
+        public Collection<String> getUrlPatternMappings() {
+            List<String> out = new ArrayList<>();
+            for (FilterMapping m : allMappings()) {
+                if (name.equals(m.filterName()) && m.urlPattern() != null) {
+                    out.add(m.urlPattern());
+                }
+            }
+            return out;
+        }
+
+        private List<FilterMapping> allMappings() {
+            List<FilterMapping> all = new ArrayList<>(beforeMappings);
+            all.addAll(afterMappings);
+            return all;
+        }
+
         @Override public String getName() { return name; }
-        @Override public String getClassName() {
-            Filter f = filtersByName.get(name);
-            return f == null ? null : f.getClass().getName();
+        @Override public String getFilterName() { return name; }
+        @Override public ServletContext getServletContext() { return GlintServletContext.this; }
+        @Override public String getClassName() { return filter.getClass().getName(); }
+        @Override public boolean setInitParameter(String key, String value) {
+            return initParameters.putIfAbsent(key, value) == null;
         }
-        @Override public boolean setInitParameter(String name, String value) {
-            return initParameters.putIfAbsent(name, value) == null;
+        @Override public String getInitParameter(String key) { return initParameters.get(key); }
+        @Override public Enumeration<String> getInitParameterNames() {
+            return Collections.enumeration(initParameters.keySet());
         }
-        @Override public String getInitParameter(String name) { return initParameters.get(name); }
-        @Override public Set<String> setInitParameters(Map<String, String> initParameters) {
+        @Override public Set<String> setInitParameters(Map<String, String> params) {
             Set<String> conflicts = new HashSet<>();
-            for (Map.Entry<String, String> e : initParameters.entrySet()) {
+            for (Map.Entry<String, String> e : params.entrySet()) {
                 if (!setInitParameter(e.getKey(), e.getValue())) {
                     conflicts.add(e.getKey());
                 }
