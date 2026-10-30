@@ -53,6 +53,7 @@ public final class GlintHttpServletRequest implements HttpServletRequest {
     private GlintHttpSession session;
     private boolean sessionFromCookie;
     private Collection<Part> cachedParts;
+    private boolean multipartFieldsMerged;
     private GlintAsyncContext asyncContext;
     private boolean asyncStarted;
 
@@ -289,15 +290,54 @@ public final class GlintHttpServletRequest implements HttpServletRequest {
             }
         };
     }
+    /**
+     * Servlet containers expose multipart text fields as request parameters
+     * (Spring's {@code StandardMultipartHttpServletRequest} relies on this).
+     * Merged lazily so plain requests never buffer their body.
+     */
+    private Map<String, String[]> effectiveParameters() {
+        if (multipartFieldsMerged) {
+            return parameters;
+        }
+        multipartFieldsMerged = true;
+        String ct = getContentType();
+        if (ct == null || !ct.toLowerCase(Locale.ROOT).startsWith("multipart/")) {
+            return parameters;
+        }
+        try {
+            for (Part part : getParts()) {
+                if (part.getSubmittedFileName() != null) {
+                    continue;
+                }
+                String value;
+                try (InputStream in = part.getInputStream()) {
+                    value = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+                }
+                String[] prev = parameters.get(part.getName());
+                if (prev == null) {
+                    parameters.put(part.getName(), new String[]{value});
+                } else {
+                    String[] next = java.util.Arrays.copyOf(prev, prev.length + 1);
+                    next[prev.length] = value;
+                    parameters.put(part.getName(), next);
+                }
+            }
+        } catch (IOException | ServletException e) {
+            throw new IllegalStateException("multipart parse failed", e);
+        }
+        return parameters;
+    }
     @Override public String getParameter(String name) {
-        String[] v = parameters.get(name);
+        String[] v = effectiveParameters().get(name);
         return v == null || v.length == 0 ? null : v[0];
     }
     @Override public Enumeration<String> getParameterNames() {
-        return Collections.enumeration(parameters.keySet());
+        return Collections.enumeration(effectiveParameters().keySet());
     }
-    @Override public String[] getParameterValues(String name) { return parameters.get(name); }
-    @Override public Map<String, String[]> getParameterMap() { return Collections.unmodifiableMap(parameters); }
+    @Override public String[] getParameterValues(String name) { return effectiveParameters().get(name); }
+    @Override public Map<String, String[]> getParameterMap() {
+        return Collections.unmodifiableMap(effectiveParameters());
+    }
     @Override public String getProtocol() { return "HTTP/1.1"; }
     @Override public String getScheme() { return "http"; }
     @Override public String getServerName() { return "localhost"; }
