@@ -143,7 +143,7 @@ public final class ComparisonBench {
         sb.append("warmup ").append(warmup).append("s + measure ").append(duration).append("s, ");
         sb.append("concurrency ").append(concurrency).append(", path `/hello` body `ok`\n");
         sb.append("- Glint: in-process `Glint.create(0)` / Tomcat: `tomcat-embed-core` ephemeral port\n");
-        sb.append("- Re-run: `mvn -pl glint-bench -am exec:java -Dexec.mainClass=io.github.glint.bench.ComparisonBench`\n\n");
+        sb.append("- Re-run: `powershell -ExecutionPolicy Bypass -File scripts/run-bench.ps1`\n\n");
         sb.append("| Server | req/s | errors | p50 (ms) | p99 (ms) | max (ms) |\n");
         sb.append("|--------|------:|-------:|---------:|---------:|---------:|\n");
         sb.append(row("Glint", glint, duration, g));

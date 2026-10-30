@@ -96,8 +96,7 @@ public final class StaticBench {
         section.append("(small-file cache + zero-copy for large files)\n");
         section.append("- Tomcat: embed ").append(org.apache.catalina.util.ServerInfo.getServerNumber());
         section.append(" `DefaultServlet` / `initWebappDefaults`, docBase = temp dir\n");
-        section.append("- Re-run: `mvn -pl glint-bench -am exec:java ");
-        section.append("-Dexec.mainClass=io.github.glint.bench.StaticBench`\n\n");
+        section.append("- Re-run: `powershell -ExecutionPolicy Bypass -File scripts/run-bench.ps1`\n\n");
         section.append("| Size | Server | req/s | errors | p50 (ms) | p99 (ms) | max (ms) |\n");
         section.append("|------|--------|------:|-------:|---------:|---------:|---------:|\n");
 
