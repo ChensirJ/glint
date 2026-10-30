@@ -30,10 +30,9 @@ Numbers are machine-local and not a guarantee of production ranking.
 | 2 MiB | Tomcat DefaultServlet | 243 | 0 | 275.66 | 421.08 | 445.15 |
 
 Numbers are machine-local and not a guarantee of production ranking.
-
 ## Realistic suite (Glint vs Tomcat, same app logic)
 
-- Captured: **2026-10-30 15:56:21 CST** (Asia/Shanghai)
+- Captured: **2026-10-30 16:22:35 CST** (Asia/Shanghai); upload-1MiB rows re-measured after streaming bodies (other realistic cells kept from 15:56:21 CST)
 - CPU: AMD Ryzen 7 7840HS w/ Radeon 780M Graphics
 - Logical cores: 16
 - RAM: 31.2 GiB
@@ -53,7 +52,7 @@ Scenarios:
 - json+db+cpu: `POST /api/order` with a 7 KiB JSON order (60 lines): parse, price lines, SHA-256 x5 over the body, sleep 15 ms, serialize a ~5 KiB JSON response
 - mixed-traffic: 70% `GET /api/item` (10 ms wait + 1 KiB JSON), 20% 4 KiB static CSS, 10% 1 MiB static file
 - keep-alive vs conn-per-req: `GET /api/hello` tiny JSON; conn-per-req sends `Connection: close` and opens a new TCP connection for every request
-- upload-1MiB: `POST /api/upload` with a 1 MiB body, handler reads it fully and returns CRC32
+- upload-1MiB: `POST /api/upload` with a 1 MiB body; handler streams via bodyStream() and returns CRC32
 
 | Scenario | Clients | Server | req/s (median) | req/s min-max | p50 ms | p99 ms | p99.9 ms | errors | connect errors | timeouts | heap peak MiB | RSS MiB | platform threads peak |
 |----------|--------:|--------|---------------:|---------------|-------:|-------:|---------:|-------:|---------------:|---------:|--------------:|--------:|----------------------:|
@@ -77,8 +76,8 @@ Scenarios:
 | keep-alive | 64 | Tomcat | 85244 | 84267-87511 | 0.68 | 2.27 | 3.89 | 0 | 0 | 0 | 380 | 531 | 212 |
 | conn-per-req | 64 | Glint | 20714 | 20062-21162 | 2.98 | 4.54 | 10.08 | 0 | 0 | 0 | 154 | 350 | 41 |
 | conn-per-req | 64 | Tomcat | 17759 | 17685-18340 | 3.52 | 5.22 | 6.33 | 0 | 0 | 0 | 382 | 539 | 212 |
-| upload-1MiB | 64 | Glint | 1018 | 1016-1061 | 63.73 | 113.46 | 130.33 | 0 | 0 | 0 | 538 | 571 | 41 |
-| upload-1MiB | 64 | Tomcat | 3653 | 3613-3728 | 17.06 | 42.42 | 61.33 | 0 | 0 | 0 | 375 | 530 | 212 |
+| upload-1MiB | 64 | Glint | 5631 | 5602-5892 | 10.74 | 26.96 | 37.79 | 0 | 0 | 0 | 158 | 241 | 33 |
+| upload-1MiB | 64 | Tomcat | 7200 | 4986-7213 | 8.14 | 28.84 | 42.09 | 0 | 0 | 0 | 162 | 273 | 79 |
 
 Mixed-traffic breakdown (median round):
 
@@ -93,4 +92,6 @@ Mixed-traffic breakdown (median round):
 
 errors = reset/EOF/non-200 on an established connection; connect errors = failed TCP connect (e.g. accept backlog full); timeouts = no response within 10 s. The generator closes sockets with SO_LINGER=0 (RST) to avoid client TIME_WAIT exhaustion.
 
-Caveats: closed-loop load (a slow server also slows the generator, so tail latency is understated versus an open-loop tool such as wrk2); generator and server share the same CPU; Glint buffers request bodies in memory (up to maxRequestBodyBytes) while Tomcat streams them; platform-thread counts exclude Glint's virtual threads by design; simulated waits use Thread.sleep, and on Windows JDK 21 virtual-thread timed sleeps are coarser under load than platform-thread sleeps, which penalizes Glint in sleep-heavy cells.
+Caveats: closed-loop load (a slow server also slows the generator, so tail latency is understated versus an open-loop tool such as wrk2); generator and server share the same CPU; Glint streams request bodies via bodyStream()/bodyChannel() (bodyBytes() still buffers when called); platform-thread counts exclude Glint's virtual threads by design; simulated waits use Thread.sleep, and on Windows JDK 21 virtual-thread timed sleeps are coarser under load than platform-thread sleeps, which penalizes Glint in sleep-heavy cells.
+
+

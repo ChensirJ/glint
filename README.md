@@ -190,7 +190,7 @@ Sessions, cookies, multipart uploads, and Spring MVC mapping work through the
 
 - Methods: GET, HEAD, POST, PUT, DELETE, PATCH, OPTIONS
 - Query string, path params `{id}`, greedy `{*path}`
-- Bodies: `Content-Length`, **chunked**, **`multipart/form-data`** (size-limited)
+- Bodies: `Content-Length`, **chunked**, **`multipart/form-data`** (size-limited); stream large uploads with `req.bodyStream()` / `req.bodyChannel()` (or buffer with `bodyBytes()` / `bodyText()`)
 - **Static mounts**: `Glint.staticFiles(prefix, Path[, StaticOptions])` and `classpathFiles(prefix, root)` with MIME, HEAD, `Range`, path-traversal checks, **ETag** / **Last-Modified**, conditional **304**, **small-file cache** plus a per-path metadata cache (no filesystem calls on hot hits; edits visible within `StaticOptions.revalidateMillis`, default 1000 ms), **zero-copy** `FileChannel.transferTo` for large files on plain TCP, **precompressed** `.br`/`.gz` siblings (`Content-Encoding` + `Vary`), and **immutable** `Cache-Control` for fingerprinted names
 - Limits / idle timeout / **fast graceful shutdown** (force-closes keep-alive sockets)
 - Optional **TLS** via `ServerConfig.builder().sslContext(SSLContext)`
@@ -254,14 +254,14 @@ Captured **2026-10-30 15:56 CST** (Asia/Shanghai). Each server runs in its own J
 | Mixed: 70% API / 20% 4 KiB / 10% 1 MiB static | 500 | 24,520 | 18,401 | 74.1 | 49.6 | Glint on req/s, **Tomcat** on p99 |
 | Keep-alive tiny JSON | 64 | 84,771 | 85,244 | 2.1 | 2.3 | Tie |
 | New connection per request | 64 | 20,714 | 17,759 | 4.5 | 5.2 | Glint |
-| 1 MiB upload (read + CRC32) | 64 | 1,018 | 3,653 | 113.5 | 42.4 | **Tomcat** |
+| 1 MiB upload (stream + CRC32) | 64 | 5,631 | 7,200 | 27.0 | 28.8 | **Tomcat** |
 
 Peak platform threads: Glint 33-41 vs Tomcat 212 in every scenario. Memory goes both ways. For example, at JSON 1000 clients Glint peaked at 618 MiB heap / 766 MiB RSS against Tomcat's 361 / 516 MiB, at twice the throughput.
 
 What this shows, including where Tomcat wins:
 
 - **Blocking I/O is the Glint case.** Tomcat is capped near `maxThreads / latency` (200 / ~62 ms = ~3.2k req/s), and its queueing latency grows with clients. Glint keeps one virtual thread per connection, so throughput scales with clients and p50 stays at the downstream latency until the CPU saturates.
-- **Tomcat wins uploads by ~3.6x.** Glint buffers the whole request body in a `byte[]` before the handler runs (a 1 MiB humongous allocation per request in G1). Tomcat streams it through small buffers. A streaming request-body API is on the roadmap.
+- **Tomcat still leads uploads (~1.3x).** After adding `bodyStream()` / `bodyChannel()`, Glint no longer buffers the whole 1 MiB body before the handler (heap peak dropped from ~538 MiB to ~158 MiB on this cell). Throughput rose from 1,018 to 5,631 req/s. Tomcat remains ahead at 7,200 req/s median on this Windows closed-loop run; Glint won one of the three rounds (5,602 vs 4,986).
 - **Tomcat wins JSON + DB wait at 200 clients.** At this load Tomcat's 200 platform threads are enough. In Glint, the simulated DB wait is `Thread.sleep` on a virtual thread. On Windows with JDK 21 that is coarser under load: a micro-check with 200 staggered sleepers measured `sleep(15)` at 21.05 ms on virtual threads vs 15.48 ms on platform threads. That explains part of the gap, not all of it. Above 200 clients Glint pulls ahead.
 - **Mixed traffic:** Glint serves more requests, but its API p99 is worse than Tomcat's (76 vs 50 ms) in the median round, and Glint's round-to-round spread was wider (22.6k-28.9k req/s).
 - Keep-alive tiny responses are a tie. With a new connection per request, Glint is ~17% ahead.
@@ -318,7 +318,7 @@ Requires **JDK 21+** and **Maven 3.9+**.
 - [x] Static ETag / Last-Modified / 304
 - [x] Rate-limit counters on `/_vt` (`rateLimit.allowed` / `rejected`)
 - [x] Multi `Set-Cookie` header support (`HttpResponse.cookie`)
-- [ ] Streaming request bodies (large uploads without full buffering)
+- [x] Streaming request bodies (`bodyStream()` / `bodyChannel()`; `bodyBytes()` still buffers when called)
 - [ ] Linux re-run of the realistic suite and an open-loop (wrk2-style) generator
 - [ ] Published JMH vs Tomcat / Undertow / Jetty with CI numbers
 - [ ] GraalVM native-image recipe for standalone mode
