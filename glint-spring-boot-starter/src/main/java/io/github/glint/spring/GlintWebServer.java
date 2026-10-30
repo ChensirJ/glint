@@ -1,6 +1,7 @@
 package io.github.glint.spring;
 
 import io.github.glint.diag.DiagnosticsHandler;
+import io.github.glint.http.ServerConfig;
 import io.github.glint.http.VtServer;
 import io.github.glint.http.staticfiles.StaticFiles;
 import io.github.glint.http.staticfiles.StaticOptions;
@@ -18,6 +19,7 @@ import org.springframework.boot.web.server.WebServer;
 import org.springframework.boot.web.server.WebServerException;
 
 import java.io.IOException;
+import java.net.InetAddress;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
@@ -40,8 +42,17 @@ public final class GlintWebServer implements WebServer {
     }
 
     public GlintWebServer(int port, GlintServletContext context, GlintProperties properties) throws IOException {
+        this(port, null, context, properties);
+    }
+
+    /**
+     * @param address local address to bind ({@code server.address}), or {@code null} for all interfaces
+     */
+    public GlintWebServer(int port, InetAddress address, GlintServletContext context, GlintProperties properties)
+            throws IOException {
         this.context = context;
-        this.server = new VtServer(port, buildPipeline(context, properties));
+        this.server = new VtServer(port, buildPipeline(context, properties),
+                ServerConfig.builder().bindAddress(address).build());
     }
 
     private static GlintProperties propertiesWithDiagnostics(boolean diagnostics) {

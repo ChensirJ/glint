@@ -72,15 +72,14 @@ Use Spring's `CorsRegistry` instead of `glint.cors` when you need per-mapping
 CORS rules.
 
 Known limits: no `RequestDispatcher` forward/include and no `ERROR` dispatch to
-`/error` mappings; `server.address` is not honored yet (Glint binds all
-interfaces on `server.port`).
+`/error` mappings.
 
 ## Property reference
 
 | Property | Default | Wired? | Notes |
 |----------|---------|:------:|-------|
 | `server.port` | `8080` | yes | Standard Spring Boot listen port (use `0` for ephemeral). |
-| `server.address` | all interfaces | no | Glint binds all interfaces. |
+| `server.address` | all interfaces | yes | Bind to one local address (for example `127.0.0.1`). |
 | `spring.servlet.multipart.*` | Boot defaults | yes | Size limits apply through Spring's multipart resolver. |
 | `glint.diagnostics` | `true` | yes | Mount `/_vt` diagnostics UI and JSON APIs. |
 | `glint.static.enabled` | `false` | yes | Serve static files from Glint before Spring MVC. |

@@ -42,6 +42,7 @@ import static org.junit.jupiter.api.Assertions.*;
         webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
         properties = {
                 "spring.main.banner-mode=off",
+                "server.address=127.0.0.1",
                 "spring.servlet.multipart.enabled=true",
                 "spring.servlet.multipart.max-file-size=2MB",
                 "spring.servlet.multipart.max-request-size=2MB",
