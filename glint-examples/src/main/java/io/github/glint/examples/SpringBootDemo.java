@@ -7,11 +7,15 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * Spring Boot 3.2+ demo running on Glint instead of Tomcat.
+ * Spring Boot 3.2 demo running on Glint instead of Tomcat.
  *
- * <p>The {@code glint-spring-boot-starter} dependency replaces the servlet
- * container. Exclude {@code spring-boot-starter-tomcat} if you pull in
- * {@code spring-boot-starter-web} transitively from elsewhere.
+ * <p>Exclude {@code spring-boot-starter-tomcat} and depend on
+ * {@code glint-spring-boot-starter}. Run with:
+ *
+ * <pre>{@code
+ * mvn -pl glint-examples -am -Pspring-demo spring-boot:run
+ * # or .\scripts\run-spring.ps1
+ * }</pre>
  */
 @SpringBootApplication
 public class SpringBootDemo {
@@ -24,18 +28,13 @@ public class SpringBootDemo {
     static class HelloController {
 
         @GetMapping("/hello")
-        public String hello() {
+        String hello() {
             return "Hello from Spring Boot on Glint!";
         }
 
-        @GetMapping("/users/{id}")
-        public String user(@PathVariable("id") String id) {
-            StringBuilder sb = new StringBuilder();
-            sb.append('{');
-            sb.append('"').append("id").append('"').append(':').append('"').append(id).append('"').append(',');
-            sb.append('"').append("via").append('"').append(':').append('"').append("spring-mvc").append('"');
-            sb.append('}');
-            return sb.toString();
+        @GetMapping("/api/users/{id}")
+        String user(@PathVariable("id") String id) {
+            return "{\"id\":\"" + id + "\",\"via\":\"spring-mvc\"}";
         }
     }
 }

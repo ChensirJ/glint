@@ -37,12 +37,45 @@
   <build>
     <plugins>
       <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>exec-maven-plugin</artifactId>
+        <version>3.3.0</version>
+        <configuration>
+          <mainClass>io.github.glint.examples.StandaloneDemo</mainClass>
+        </configuration>
+      </plugin>
+      <plugin>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-maven-plugin</artifactId>
         <configuration>
           <skip>true</skip>
+          <mainClass>io.github.glint.examples.SpringBootDemo</mainClass>
         </configuration>
       </plugin>
     </plugins>
   </build>
+  <profiles>
+    <profile>
+      <id>spring-demo</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-maven-plugin</artifactId>
+            <configuration>
+              <skip>false</skip>
+              <mainClass>io.github.glint.examples.SpringBootDemo</mainClass>
+            </configuration>
+            <executions>
+              <execution>
+                <goals>
+                  <goal>repackage</goal>
+                </goals>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
 </project>
