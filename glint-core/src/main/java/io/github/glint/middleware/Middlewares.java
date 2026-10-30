@@ -1,6 +1,7 @@
 package io.github.glint.middleware;
 
 import io.github.glint.http.HttpRequest;
+import io.github.glint.obs.Trace;
 import io.github.glint.util.Json;
 
 import java.io.PrintStream;
@@ -12,7 +13,7 @@ import java.util.function.Function;
 
 /**
  * Built-in middleware helpers: CORS, access log, token-bucket rate limit,
- * and JSON exception mapping.
+ * gzip content negotiation, and JSON exception mapping.
  */
 public final class Middlewares {
 
@@ -97,8 +98,23 @@ public final class Middlewares {
     }
 
     /**
+     * Negotiate response compression after the handler runs.
+     * Currently {@code gzip} only (JDK built-in). Brotli is not enabled
+     * without native/third-party encoders.
+     */
+    public static Middleware compress() {
+        return (req, resp, next) -> {
+            next.handle(req, resp);
+            if (!resp.committed()) {
+                resp.negotiateContentEncoding(req);
+            }
+        };
+    }
+
+    /**
      * Token-bucket rate limit. When exhausted, responds {@code 429} with
-     * {@code Retry-After: 1} and a small JSON body.
+     * {@code Retry-After} (seconds until one token refills) and a small JSON body.
+     * Decisions are counted in {@link Trace#METRICS} under {@code rateLimit}.
      *
      * @param permitsPerSecond sustained rate
      * @param burst            bucket capacity
@@ -122,11 +138,13 @@ public final class Middlewares {
                 key = "global";
             }
             if (!limiter.tryAcquire(key)) {
+                Trace.METRICS.recordRateLimit(false);
                 resp.status(429)
-                        .header("Retry-After", "1")
+                        .header("Retry-After", Integer.toString(limiter.retryAfterSeconds()))
                         .json("{\"error\":\"Too Many Requests\",\"status\":429}");
                 return;
             }
+            Trace.METRICS.recordRateLimit(true);
             next.handle(req, resp);
         };
     }

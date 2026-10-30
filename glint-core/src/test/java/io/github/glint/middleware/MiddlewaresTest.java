@@ -1,6 +1,7 @@
 package io.github.glint.middleware;
 
 import io.github.glint.Glint;
+import io.github.glint.obs.Trace;
 import io.github.glint.http.ServerConfig;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -13,6 +14,8 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.zip.GZIPInputStream;
+import java.io.ByteArrayInputStream;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -31,6 +34,8 @@ class MiddlewaresTest {
     void corsOptionsAndAccessLogAndRateLimit() throws Exception {
         List<String> lines = new ArrayList<>();
         AtomicInteger hits = new AtomicInteger();
+        long allowedBefore = Trace.METRICS.rateLimitAllowed();
+        long rejectedBefore = Trace.METRICS.rateLimitRejected();
 
         glint = Glint.create(0)
                 .pinningWatcher(false)
@@ -68,8 +73,10 @@ class MiddlewaresTest {
         assertEquals(200, a.statusCode());
         assertEquals(200, b.statusCode());
         assertEquals(429, c.statusCode());
-        assertEquals("1", c.headers().firstValue("retry-after").orElse(""));
+        assertFalse(c.headers().firstValue("retry-after").orElse("").isBlank());
         assertEquals(2, hits.get());
+        assertEquals(2L, Trace.METRICS.rateLimitAllowed() - allowedBefore);
+        assertEquals(1L, Trace.METRICS.rateLimitRejected() - rejectedBefore);
         assertFalse(lines.isEmpty());
         assertTrue(lines.stream().anyMatch(l -> l.contains("GET /ok")));
     }
@@ -83,7 +90,47 @@ class MiddlewaresTest {
         assertTrue(lim.tryAcquire("k"));
     }
 
+
+    @Test
+    void gzipCompressionNegotiated() throws Exception {
+        String payload = "x".repeat(2000);
+        glint = Glint.create(0)
+                .pinningWatcher(false)
+                .config(ServerConfig.builder().idleTimeoutMs(3_000).shutdownWaitMs(1_000).build())
+                .before(Middlewares.compress())
+                .get("/big", (req, resp) -> resp.text(payload))
+                .startAsync();
+
+        int port = glint.port();
+        HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build();
+
+        HttpResponse<byte[]> gz = client.send(
+                HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/big"))
+                        .timeout(Duration.ofSeconds(3))
+                        .header("Accept-Encoding", "gzip")
+                        .GET().build(),
+                HttpResponse.BodyHandlers.ofByteArray());
+        assertEquals(200, gz.statusCode());
+        assertEquals("gzip", gz.headers().firstValue("content-encoding").orElse(""));
+        assertTrue(gz.headers().firstValue("vary").orElse("").toLowerCase().contains("accept-encoding"));
+        try (GZIPInputStream gin = new GZIPInputStream(new ByteArrayInputStream(gz.body()))) {
+            String decoded = new String(gin.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+            assertEquals(payload, decoded);
+        }
+
+        HttpResponse<String> plain = client.send(
+                HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/big"))
+                        .timeout(Duration.ofSeconds(3))
+                        .header("Accept-Encoding", "identity")
+                        .GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, plain.statusCode());
+        assertTrue(plain.headers().firstValue("content-encoding").isEmpty());
+        assertEquals(payload, plain.body());
+    }
+
     private static HttpRequest get(int port, String path) {
+
         return HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + path))
                 .timeout(Duration.ofSeconds(3)).GET().build();
     }

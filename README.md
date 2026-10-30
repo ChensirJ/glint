@@ -48,7 +48,7 @@ cd ..\glint-demo
 
 | Module | Description |
 |--------|-------------|
-| `glint-core` | HTTP parser (Content-Length + chunked + **multipart**), static mounts, VT server, router, middleware (CORS/accessLog/rateLimit), Trace, Metrics, PinningWatcher, OTLP JSON export hooks (**zero** third-party deps) |
+| `glint-core` | HTTP parser (Content-Length + chunked + **multipart**), static mounts (ETag/304), VT server, router, middleware (CORS/accessLog/rateLimit/compress), Trace, Metrics, PinningWatcher, OTLP JSON export hooks (**zero** third-party deps) |
 | `glint-dashboard` | Modern dark `/_vt` UI |
 | `glint-servlet` | Jakarta Servlet 6 adapter (sessions, multipart `Part`s, async stub) |
 | `glint-spring-boot-starter` | Drop-in Tomcat replacement |
@@ -89,12 +89,12 @@ Bundled entry point with a real `main`: `io.github.glint.examples.StandaloneDemo
 - Methods: GET, HEAD, POST, PUT, DELETE, PATCH, OPTIONS
 - Query string, path params `{id}`, greedy `{*path}`
 - Bodies: `Content-Length`, **chunked**, **`multipart/form-data`** (size-limited)
-- **Static mounts**: `Glint.staticFiles(prefix, Path)` and `classpathFiles(prefix, root)` with MIME, HEAD, basic `Range`, path-traversal checks
+- **Static mounts**: `Glint.staticFiles(prefix, Path)` and `classpathFiles(prefix, root)` with MIME, HEAD, basic `Range`, path-traversal checks, **ETag** / **Last-Modified**, conditional **304** (`If-None-Match` / `If-Modified-Since`)
 - Limits / idle timeout / **fast graceful shutdown** (force-closes keep-alive sockets)
 - Optional **TLS** via `ServerConfig.builder().sslContext(SSLContext)`
 - Diagnostics: `/_vt`, metrics, slow, pinning, **`/_vt/api/otlp/v1/metrics`** (OTLP/HTTP JSON, no SDK dep)
 - ObsExporter SPI (`ServiceLoader`) for custom exporters
-- Middleware: **CORS** (`CorsOptions`), **accessLog** / `requestLogging`, **token-bucket rateLimit**, exception -> JSON
+- Middleware: **CORS** (`CorsOptions`), **accessLog** / `requestLogging`, **token-bucket rateLimit** (Retry-After + `/_vt` counters), **gzip compress** (`Accept-Encoding`; no Brotli without native deps), exception -> JSON
 - Cookies: multiple **`Set-Cookie`** header lines (`resp.cookie(...)` / `addCookie`)
 - WebSocket / HTTP Upgrade via `Glint.websocket(path, handler)` (RFC 6455, HTTP/1.1): **text**, **binary**, **ping/pong** (auto-reply), **close codes**, **fragmented message reassembly**
 
@@ -115,6 +115,7 @@ public class Main {
                 .exposeHeaders("Content-Range")
                 .build()))
             .before(Middlewares.rateLimit(100, 50))
+            .before(Middlewares.compress())
             .staticFiles("/assets", Path.of("public"))
             .classpathFiles("/web", "static/web")
             .get("/hello", (req, resp) -> resp.text("ok"))
@@ -181,7 +182,9 @@ Requires **JDK 21+** and **Maven 3.9+**.
 - [x] Servlet sessions (`JSESSIONID`), multipart `Part`s, async `startAsync`/`complete` stub
 - [x] WebSocket HTTP/1.1 Upgrade: text, binary, ping/pong, close codes, fragmented messages (Glint.websocket)
 - [x] Static file mounts (directory + classpath) with MIME / HEAD / Range
-- [x] Middleware helpers: CORS options, accessLog, token-bucket rateLimit
+- [x] Middleware helpers: CORS options, accessLog, token-bucket rateLimit, gzip compress
+- [x] Static ETag / Last-Modified / 304
+- [x] Rate-limit counters on `/_vt` (`rateLimit.allowed` / `rejected`)
 - [x] Multi `Set-Cookie` header support (`HttpResponse.cookie`)
 - [ ] Published JMH vs Tomcat / Undertow / Jetty with CI numbers
 - [ ] GraalVM native-image recipe for standalone mode

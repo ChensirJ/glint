@@ -1,6 +1,7 @@
 package io.github.glint.http;
 
 import java.io.BufferedOutputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.charset.Charset;
@@ -11,6 +12,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.zip.GZIPOutputStream;
 
 /**
  * Streaming HTTP/1.1 response writer.
@@ -173,6 +175,132 @@ public final class HttpResponse {
     public HttpResponse empty() {
         this.body = new byte[0];
         return this;
+    }
+
+    /** Current response body bytes (may be empty). */
+    public byte[] body() {
+        return body;
+    }
+
+    /** Replace the buffered body (used by compression middleware). */
+    public HttpResponse body(byte[] data) {
+        this.body = data == null ? new byte[0] : data;
+        return this;
+    }
+
+    /**
+     * Negotiate {@code Content-Encoding} from the request {@code Accept-Encoding}.
+     * Supports {@code gzip} via JDK {@link GZIPOutputStream}. Brotli ({@code br}) is
+     * not offered: the JDK has no pure-Java Brotli encoder without native/third-party deps.
+     *
+     * <p>No-ops when already committed, empty/tiny bodies, non-compressible types,
+     * error-ish empty statuses, or when {@code Content-Encoding} is already set.
+     *
+     * @return {@code true} when the body was compressed
+     */
+    public boolean negotiateContentEncoding(HttpRequest req) {
+        if (committed || body.length < 256) {
+            return false;
+        }
+        if (status == 204 || status == 304 || status == 206) {
+            return false;
+        }
+        if (headerValue("Content-Encoding") != null) {
+            return false;
+        }
+        String ct = headerValue("Content-Type");
+        if (!isCompressible(ct)) {
+            return false;
+        }
+        String ae = req == null ? "" : req.header("accept-encoding").orElse("");
+        if (!acceptsGzip(ae)) {
+            return false;
+        }
+        try {
+            byte[] compressed = gzip(body);
+            // Only keep gzip when it actually shrinks the payload.
+            if (compressed.length >= body.length) {
+                addVaryAcceptEncoding();
+                return false;
+            }
+            this.body = compressed;
+            headers.put("Content-Encoding", "gzip");
+            addVaryAcceptEncoding();
+            return true;
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
+    private void addVaryAcceptEncoding() {
+        String vary = headerValue("Vary");
+        if (vary == null || vary.isEmpty()) {
+            headers.put("Vary", "Accept-Encoding");
+        } else if (!vary.toLowerCase(Locale.ROOT).contains("accept-encoding")) {
+            headers.put("Vary", vary + ", Accept-Encoding");
+        }
+    }
+
+    private String headerValue(String name) {
+        for (Map.Entry<String, String> e : headers.entrySet()) {
+            if (e.getKey().equalsIgnoreCase(name)) {
+                return e.getValue();
+            }
+        }
+        return null;
+    }
+
+    static boolean acceptsGzip(String acceptEncoding) {
+        if (acceptEncoding == null || acceptEncoding.isBlank()) {
+            return false;
+        }
+        String lower = acceptEncoding.toLowerCase(Locale.ROOT);
+        // Respect explicit gzip;q=0
+        for (String part : lower.split(",")) {
+            String p = part.trim();
+            if (!p.startsWith("gzip")) {
+                continue;
+            }
+            int q = p.indexOf(";q=");
+            if (q >= 0) {
+                try {
+                    double quality = Double.parseDouble(p.substring(q + 3).trim());
+                    return quality > 0.0;
+                } catch (NumberFormatException ignored) {
+                    return true;
+                }
+            }
+            return true;
+        }
+        return false;
+    }
+
+    static boolean isCompressible(String contentType) {
+        if (contentType == null || contentType.isBlank()) {
+            return false;
+        }
+        String ct = contentType.toLowerCase(Locale.ROOT);
+        int semi = ct.indexOf(';');
+        if (semi >= 0) {
+            ct = ct.substring(0, semi).trim();
+        }
+        if (ct.startsWith("text/")) {
+            return true;
+        }
+        return ct.equals("application/json")
+                || ct.equals("application/javascript")
+                || ct.equals("application/xml")
+                || ct.equals("image/svg+xml")
+                || ct.endsWith("+json")
+                || ct.endsWith("+xml");
+    }
+
+    static byte[] gzip(byte[] input) throws IOException {
+        ByteArrayOutputStream bos = new ByteArrayOutputStream(input.length);
+        try (GZIPOutputStream gos = new GZIPOutputStream(bos)) {
+            gos.write(input);
+        }
+        return bos.toByteArray();
     }
 
     public void finish() throws IOException {

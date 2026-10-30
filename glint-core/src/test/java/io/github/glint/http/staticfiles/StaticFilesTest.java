@@ -128,7 +128,50 @@ class StaticFilesTest {
     }
 
     @Test
+    void etagAndIfNoneMatchReturns304(@TempDir Path dir) throws Exception {
+        Files.writeString(dir.resolve("a.txt"), "hello-etag-body", StandardCharsets.UTF_8);
+
+        glint = Glint.create(0)
+                .pinningWatcher(false)
+                .config(ServerConfig.builder().idleTimeoutMs(3_000).shutdownWaitMs(1_000).build())
+                .staticFiles("/s", dir)
+                .startAsync();
+
+        int port = glint.port();
+        HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build();
+
+        HttpResponse<String> first = client.send(
+                HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/s/a.txt"))
+                        .timeout(Duration.ofSeconds(3)).GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, first.statusCode());
+        String etag = first.headers().firstValue("etag").orElse("");
+        assertFalse(etag.isBlank(), "ETag expected");
+        assertTrue(first.headers().firstValue("last-modified").isPresent());
+
+        HttpResponse<String> notMod = client.send(
+                HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/s/a.txt"))
+                        .timeout(Duration.ofSeconds(3))
+                        .header("If-None-Match", etag)
+                        .GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(304, notMod.statusCode());
+        assertEquals(etag, notMod.headers().firstValue("etag").orElse(""));
+        assertEquals("", notMod.body());
+
+        String lm = first.headers().firstValue("last-modified").orElseThrow();
+        HttpResponse<String> ims = client.send(
+                HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/s/a.txt"))
+                        .timeout(Duration.ofSeconds(3))
+                        .header("If-Modified-Since", lm)
+                        .GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(304, ims.statusCode());
+    }
+
+    @Test
     void parseRangeHelpers() {
+
         StaticFiles.Range r = StaticFiles.parseRange("bytes=2-5", 10);
         assertNotNull(r);
         assertTrue(r.satisfiable());

@@ -12,6 +12,11 @@ import java.io.InputStream;
 import java.net.URL;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.FileTime;
+import java.security.MessageDigest;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.Optional;
@@ -20,7 +25,9 @@ import java.util.Optional;
  * Static asset mounts for directory roots and classpath folders.
  *
  * <p>Features: MIME mapping, HEAD (via GET fallback), basic single-range
- * {@code bytes=} support, and path-traversal protection.
+ * {@code bytes=} support, path-traversal protection, weak {@code ETag},
+ * {@code Last-Modified}, and conditional {@code 304 Not Modified}
+ * ({@code If-None-Match} / {@code If-Modified-Since}).
  */
 public final class StaticFiles {
 
@@ -89,7 +96,8 @@ public final class StaticFiles {
                     return;
                 }
                 byte[] data = in.readAllBytes();
-                writeBytes(req, resp, data, MimeTypes.forPath(resource), resource);
+                writeBytes(req, resp, data, MimeTypes.forPath(resource), resource,
+                        contentHashEtag(data), null);
             }
         };
         register(router, prefix, handler);
@@ -130,13 +138,34 @@ public final class StaticFiles {
             return;
         }
         byte[] data = Files.readAllBytes(file);
-        writeBytes(req, resp, data, MimeTypes.forPath(file.getFileName().toString()), file.getFileName().toString());
+        FileTime mtime = Files.getLastModifiedTime(file);
+        String etag = weakEtag(data.length, mtime.toMillis());
+        writeBytes(req, resp, data, MimeTypes.forPath(file.getFileName().toString()),
+                file.getFileName().toString(), etag, mtime.toInstant());
     }
 
     static void writeBytes(HttpRequest req, HttpResponse resp, byte[] data, String contentType, String name)
             throws IOException {
+        writeBytes(req, resp, data, contentType, name, contentHashEtag(data), null);
+    }
+
+    static void writeBytes(HttpRequest req, HttpResponse resp, byte[] data, String contentType, String name,
+                           String etag, Instant lastModified)
+            throws IOException {
         resp.header("Accept-Ranges", "bytes");
         resp.header("Content-Type", contentType == null ? "application/octet-stream" : contentType);
+        if (etag != null && !etag.isEmpty()) {
+            resp.header("ETag", etag);
+        }
+        if (lastModified != null) {
+            resp.header("Last-Modified", formatHttpDate(lastModified));
+        }
+
+        if (isNotModified(req, etag, lastModified)) {
+            resp.status(304).empty();
+            return;
+        }
+
         Optional<String> rangeHeader = req.header("range");
         if (rangeHeader.isPresent() && req.method() == HttpMethod.GET) {
             Range range = parseRange(rangeHeader.get(), data.length);
@@ -159,6 +188,93 @@ public final class StaticFiles {
             return;
         }
         resp.status(200).bytes(data, contentType);
+    }
+
+    /** Weak ETag from size + mtime (filesystem mounts). */
+    static String weakEtag(long size, long mtimeMillis) {
+        return "W/\"" + Long.toHexString(size) + "-" + Long.toHexString(mtimeMillis) + "\"";
+    }
+
+    /** Strong-ish ETag from SHA-256 of content (classpath mounts). */
+    static String contentHashEtag(byte[] data) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] dig = md.digest(data == null ? new byte[0] : data);
+            StringBuilder sb = new StringBuilder(dig.length * 2 + 2);
+            sb.append('"');
+            for (byte b : dig) {
+                sb.append(String.format("%02x", b));
+            }
+            sb.append('"');
+            return sb.toString();
+        } catch (Exception e) {
+            return "W/\"" + (data == null ? 0 : data.length) + "\"";
+        }
+    }
+
+    static final DateTimeFormatter HTTP_DATE = DateTimeFormatter.RFC_1123_DATE_TIME.withZone(ZoneOffset.UTC);
+
+    static String formatHttpDate(Instant instant) {
+        return HTTP_DATE.format(instant);
+    }
+
+    /**
+     * RFC 9110 conditional GET: prefer {@code If-None-Match}; else {@code If-Modified-Since}.
+     */
+    static boolean isNotModified(HttpRequest req, String etag, Instant lastModified) {
+        Optional<String> inm = req.header("if-none-match");
+        if (inm.isPresent() && etag != null) {
+            return etagMatches(inm.get(), etag);
+        }
+        if (lastModified == null) {
+            return false;
+        }
+        Optional<String> ims = req.header("if-modified-since");
+        if (ims.isEmpty()) {
+            return false;
+        }
+        Instant since = parseHttpDate(ims.get());
+        if (since == null) {
+            return false;
+        }
+        // Compare at second resolution (HTTP-date has no sub-second precision).
+        long fileSec = lastModified.getEpochSecond();
+        long sinceSec = since.getEpochSecond();
+        return fileSec <= sinceSec;
+    }
+
+    static boolean etagMatches(String ifNoneMatch, String etag) {
+        String hay = ifNoneMatch.trim();
+        if ("*".equals(hay)) {
+            return true;
+        }
+        String target = stripWeakPrefix(etag);
+        for (String part : hay.split(",")) {
+            String cand = stripWeakPrefix(part.trim());
+            if (cand.equals(target) || part.trim().equals(etag)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static String stripWeakPrefix(String tag) {
+        String t = tag.trim();
+        if (t.regionMatches(true, 0, "W/", 0, 2)) {
+            t = t.substring(2).trim();
+        }
+        return t;
+    }
+
+    static Instant parseHttpDate(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            return Instant.from(HTTP_DATE.parse(value.trim()));
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     /**

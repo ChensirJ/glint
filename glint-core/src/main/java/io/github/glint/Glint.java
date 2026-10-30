@@ -99,7 +99,7 @@ public final class Glint {
     /**
      * Mount a filesystem directory at {@code urlPrefix}.
      * Serves MIME-typed files with HEAD support, basic {@code Range} bytes,
-     * and path-traversal protection.
+     * path-traversal protection, ETag / Last-Modified, and conditional 304.
      */
     public Glint staticFiles(String urlPrefix, Path directory) {
         StaticFiles.mountDirectory(router, urlPrefix, directory);

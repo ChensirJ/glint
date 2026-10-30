@@ -24,6 +24,7 @@ public final class StandaloneDemo {
                 .before(Middlewares.requestLogging())
                 .before(Middlewares.exceptionHandler())
                 .before(Middlewares.cors())
+                .before(Middlewares.compress())
                 .get("/hello", (req, resp) -> resp.text("Hello, virtual threads!"))
                 .get("/users/{id}", (req, resp) -> {
                     String id = req.pathParam("id");

@@ -67,7 +67,7 @@
     document.getElementById("waterfallHint").textContent =
       spans && spans.length
         ? "Spans from the latest slow request."
-        : "Illustrative spans — live data appears after a slow request.";
+        : "Illustrative spans - live data appears after a slow request.";
   }
 
   function renderPins(events) {
@@ -145,16 +145,26 @@
       document.getElementById("health").textContent =
         "UP · Java " + (health.java || "?");
 
+      const vt = threads.virtualThreadsApprox;
+      const active = threads.activeRequests;
       document.getElementById("vtCount").textContent =
-        threads.virtualThreadsApprox ?? threads.activeRequests ?? "—";
+        vt != null ? vt : (active != null ? active : "-");
       document.getElementById("vtSub").textContent =
-        "in-flight requests: " + (threads.activeRequests ?? "—");
+        "in-flight requests: " + (active != null ? active : "-");
 
-      const pinN = threads.pinningEvents ?? metrics.pinningEvents ?? 0;
+      const pinN = threads.pinningEvents != null ? threads.pinningEvents
+        : (metrics.pinningEvents != null ? metrics.pinningEvents : 0);
       document.getElementById("pinCount").textContent = pinN;
 
       const paths = metrics.paths || {};
       document.getElementById("pathCount").textContent = Object.keys(paths).length;
+
+      const rl = metrics.rateLimit || {};
+      const rejected = rl.rejected != null ? rl.rejected : 0;
+      const allowed = rl.allowed != null ? rl.allowed : 0;
+      document.getElementById("rlRejected").textContent = rejected;
+      document.getElementById("rlSub").textContent =
+        rejected + " rejected / " + allowed + " allowed";
 
       const tbody = document.querySelector("#latencyTable tbody");
       tbody.innerHTML = "";

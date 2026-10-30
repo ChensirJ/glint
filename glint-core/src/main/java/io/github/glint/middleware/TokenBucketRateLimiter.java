@@ -13,6 +13,7 @@ import java.util.function.Function;
 public final class TokenBucketRateLimiter {
 
     private final double capacity;
+    private final double permitsPerSecond;
     private final double refillPerNanos;
     private final ConcurrentHashMap<Object, Bucket> buckets = new ConcurrentHashMap<>();
 
@@ -28,6 +29,7 @@ public final class TokenBucketRateLimiter {
             throw new IllegalArgumentException("burst must be > 0");
         }
         this.capacity = burst;
+        this.permitsPerSecond = permitsPerSecond;
         this.refillPerNanos = permitsPerSecond / 1_000_000_000.0;
     }
 
@@ -36,6 +38,18 @@ public final class TokenBucketRateLimiter {
         Objects.requireNonNull(key, "key");
         Bucket b = buckets.computeIfAbsent(key, k -> new Bucket(capacity));
         return b.tryAcquire(capacity, refillPerNanos);
+    }
+
+    /**
+     * Suggested {@code Retry-After} seconds when a request was rejected
+     * (ceil of time to refill one token at the configured rate).
+     */
+    public int retryAfterSeconds() {
+        return Math.max(1, (int) Math.ceil(1.0 / permitsPerSecond));
+    }
+
+    public double permitsPerSecond() {
+        return permitsPerSecond;
     }
 
     /** Approximate number of tracked keys (for tests / diagnostics). */

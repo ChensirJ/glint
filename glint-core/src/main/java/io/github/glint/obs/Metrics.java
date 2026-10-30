@@ -20,6 +20,8 @@ public final class Metrics {
     private final ConcurrentHashMap<String, Histogram> latency = new ConcurrentHashMap<>();
     private final LongAdder pinningEvents = new LongAdder();
     private final LongAdder totalRequests = new LongAdder();
+    private final LongAdder rateLimitAllowed = new LongAdder();
+    private final LongAdder rateLimitRejected = new LongAdder();
 
     public void record(String path, long durNs) {
         totalRequests.increment();
@@ -31,6 +33,15 @@ public final class Metrics {
         pinningEvents.increment();
     }
 
+    /** Count a rate-limit decision (allowed vs rejected with 429). */
+    public void recordRateLimit(boolean allowed) {
+        if (allowed) {
+            rateLimitAllowed.increment();
+        } else {
+            rateLimitRejected.increment();
+        }
+    }
+
     public long pinningCount() {
         return pinningEvents.sum();
     }
@@ -39,11 +50,24 @@ public final class Metrics {
         return totalRequests.sum();
     }
 
+    public long rateLimitAllowed() {
+        return rateLimitAllowed.sum();
+    }
+
+    public long rateLimitRejected() {
+        return rateLimitRejected.sum();
+    }
+
     public Map<String, Object> snapshot() {
         Map<String, Object> root = new LinkedHashMap<>();
         root.put("pinningEvents", pinningEvents.sum());
         root.put("totalRequests", totalRequests.sum());
         root.put("activeRequests", Trace.activeRequests());
+        Map<String, Object> rl = new LinkedHashMap<>();
+        rl.put("allowed", rateLimitAllowed.sum());
+        rl.put("rejected", rateLimitRejected.sum());
+        rl.put("total", rateLimitAllowed.sum() + rateLimitRejected.sum());
+        root.put("rateLimit", rl);
         Map<String, Object> paths = new LinkedHashMap<>();
         for (String path : counts.keySet()) {
             Map<String, Object> m = new LinkedHashMap<>();
