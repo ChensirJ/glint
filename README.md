@@ -57,21 +57,31 @@ cd ..\glint-demo
 
 ## Quick start - standalone
 
+Yes, you can use it that way - but you still need a `main` method (README snippets often omit the class for brevity). Full runnable program:
+
 ```java
 import io.github.glint.Glint;
 import io.github.glint.middleware.Middlewares;
 
-Glint.create(8080)
-    .before(Middlewares.requestLogging())
-    .before(Middlewares.cors())
-    .get("/hello", (req, resp) -> resp.text("Hello, virtual threads!"))
-    .diagnostics("/_vt")
-    .start();
+public class Main {
+    public static void main(String[] args) throws Exception {
+        Glint.create(8080)
+            .before(Middlewares.requestLogging())
+            .before(Middlewares.cors())
+            .get("/hello", (req, resp) -> resp.text("Hello, virtual threads!"))
+            .diagnostics("/_vt")
+            .startAsync(); // non-blocking start
+
+        Thread.currentThread().join(); // keep the JVM alive
+    }
+}
 ```
+
+Bundled entry point with a real `main`: `io.github.glint.examples.StandaloneDemo`.
 
 ```bash
 .\scripts\run-standalone.ps1
-# Open http://127.0.0.1:8080/_vt
+# Open http://127.0.0.1:8080/hello and http://127.0.0.1:8080/_vt/
 ```
 
 ## HTTP features (0.1+)
