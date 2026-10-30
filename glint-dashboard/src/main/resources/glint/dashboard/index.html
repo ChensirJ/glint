@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Glint Diagnostics</title>
+  <link rel="stylesheet" href="styles.css"/>
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <span class="logo">✦</span>
+      <div>
+        <h1>Glint Diagnostics</h1>
+        <p class="tagline">See why your request is slow</p>
+      </div>
+    </div>
+    <div class="status" id="health">Connecting…</div>
+  </header>
+
+  <main class="grid">
+    <section class="card" id="summary">
+      <h2>Live summary</h2>
+      <div class="metrics-row">
+        <div class="metric"><div class="label">Virtual threads</div><div class="value" id="vtCount">—</div></div>
+        <div class="metric"><div class="label">Pinning events</div><div class="value warn" id="pinCount">—</div></div>
+        <div class="metric"><div class="label">Paths tracked</div><div class="value" id="pathCount">—</div></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Latency by path (P50 / P99)</h2>
+      <table id="latencyTable">
+        <thead><tr><th>Path</th><th>Count</th><th>P50</th><th>P99</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <section class="card">
+      <h2>Request waterfall (demo)</h2>
+      <p class="hint">Illustrative spans for a slow request — live span export lands in a later release.</p>
+      <div class="waterfall" id="waterfall"></div>
+    </section>
+
+    <section class="card alert" id="pinningCard">
+      <h2>Pinning alerts</h2>
+      <p id="pinningMsg">No pinning detected yet. On JDK 21, blocking inside <code>synchronized</code> will show up here.</p>
+      <pre id="pinningSample" class="hidden"></pre>
+    </section>
+  </main>
+
+  <footer>
+    Glint 0.1 — virtual-thread server with built-in diagnostics
+  </footer>
+  <script src="app.js"></script>
+</body>
+</html>
