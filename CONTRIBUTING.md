@@ -38,3 +38,23 @@ mvn -q verify
 ## License
 
 By contributing, you agree that your contributions are licensed under the Apache License 2.0.
+
+## Releasing
+
+Published Maven coordinates use groupId **`io.github.chensirj`** (Java packages stay `io.github.glint.*`).
+
+1. Ensure `main` is green (`mvn clean verify` and CI).
+2. Tag a release version and push the tag:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+3. The [Release](.github/workflows/release.yml) workflow runs on tags matching `v*`.
+   It sets the Maven version from the tag, runs `mvn clean verify`, and attaches
+   jars for `glint-core`, `glint-dashboard`, `glint-servlet`, and
+   `glint-spring-boot-starter` (plus sources/javadoc when present) to a GitHub
+   Release under groupId `io.github.chensirj`.
+
+Do not retag a published `v*` without a clear reason; prefer a new patch tag.
