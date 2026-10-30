@@ -1,6 +1,6 @@
 name: Release
 
-# Pushing a tag such as v0.1.0 builds the library jars and attaches them to a GitHub Release.
+# Pushing a tag such as v0.1.0 builds library jars (Maven groupId io.github.chensirj) and attaches them to a GitHub Release.
 on:
   push:
     tags: ['v*']
