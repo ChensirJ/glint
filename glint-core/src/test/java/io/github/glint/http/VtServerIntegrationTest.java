@@ -16,7 +16,7 @@ import static org.junit.jupiter.api.Assertions.*;
 /**
  * End-to-end HTTP roundtrips against an ephemeral Glint port.
  */
-class VtServerIT {
+class VtServerIntegrationTest {
 
     private Glint glint;
 
