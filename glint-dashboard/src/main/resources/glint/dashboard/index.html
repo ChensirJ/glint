@@ -7,50 +7,105 @@
   <link rel="stylesheet" href="styles.css"/>
 </head>
 <body>
+  <div class="bg-glow" aria-hidden="true"></div>
   <header class="top">
     <div class="brand">
-      <span class="logo">✦</span>
+      <div class="logo" aria-hidden="true">
+        <svg width="28" height="28" viewBox="0 0 32 32" fill="none">
+          <circle cx="16" cy="16" r="14" stroke="url(#g)" stroke-width="2"/>
+          <path d="M10 17.5L14.2 21.5L22 11.5" stroke="url(#g)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+          <defs>
+            <linearGradient id="g" x1="6" y1="4" x2="28" y2="28">
+              <stop stop-color="#7dd3fc"/><stop offset="1" stop-color="#a78bfa"/>
+            </linearGradient>
+          </defs>
+        </svg>
+      </div>
       <div>
         <h1>Glint Diagnostics</h1>
-        <p class="tagline">See why your request is slow</p>
+        <p class="tagline">Virtual-thread server · live observability</p>
       </div>
     </div>
-    <div class="status" id="health">Connecting…</div>
+    <div class="top-right">
+      <div class="pill" id="healthPill"><span class="dot"></span><span id="health">Connecting…</span></div>
+      <div class="meta" id="refreshMeta">refresh 2s</div>
+    </div>
   </header>
 
   <main class="grid">
-    <section class="card" id="summary">
-      <h2>Live summary</h2>
+    <section class="card span-3" id="summary">
+      <div class="card-head"><h2>Live summary</h2><span class="chip">LIVE</span></div>
       <div class="metrics-row">
-        <div class="metric"><div class="label">Virtual threads</div><div class="value" id="vtCount">—</div></div>
-        <div class="metric"><div class="label">Pinning events</div><div class="value warn" id="pinCount">—</div></div>
-        <div class="metric"><div class="label">Paths tracked</div><div class="value" id="pathCount">—</div></div>
+        <div class="metric">
+          <div class="label">Active virtual threads</div>
+          <div class="value" id="vtCount">—</div>
+          <div class="sub" id="vtSub">approx JVM count</div>
+        </div>
+        <div class="metric">
+          <div class="label">Pinning events</div>
+          <div class="value warn" id="pinCount">—</div>
+          <div class="sub">JDK 21 synchronized risk</div>
+        </div>
+        <div class="metric">
+          <div class="label">Paths tracked</div>
+          <div class="value" id="pathCount">—</div>
+          <div class="sub">with latency histograms</div>
+        </div>
+        <div class="metric">
+          <div class="label">Slow requests</div>
+          <div class="value" id="slowCount">—</div>
+          <div class="sub">&gt; 500 ms retained</div>
+        </div>
       </div>
     </section>
 
-    <section class="card">
-      <h2>Latency by path (P50 / P99)</h2>
-      <table id="latencyTable">
-        <thead><tr><th>Path</th><th>Count</th><th>P50</th><th>P99</th></tr></thead>
-        <tbody></tbody>
-      </table>
+    <section class="card span-2">
+      <div class="card-head"><h2>Latency by path</h2><span class="hint-inline">P50 / P99</span></div>
+      <div class="table-wrap">
+        <table id="latencyTable">
+          <thead>
+            <tr>
+              <th>Path</th>
+              <th>Count</th>
+              <th>P50</th>
+              <th>P99</th>
+              <th>Shape</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p class="empty hidden" id="latencyEmpty">No traffic yet — hit an endpoint and watch this fill in.</p>
     </section>
 
     <section class="card">
-      <h2>Request waterfall (demo)</h2>
-      <p class="hint">Illustrative spans for a slow request — live span export lands in a later release.</p>
+      <div class="card-head"><h2>Request waterfall</h2></div>
+      <p class="hint" id="waterfallHint">Latest slow request spans (or demo when idle).</p>
       <div class="waterfall" id="waterfall"></div>
     </section>
 
-    <section class="card alert" id="pinningCard">
-      <h2>Pinning alerts</h2>
-      <p id="pinningMsg">No pinning detected yet. On JDK 21, blocking inside <code>synchronized</code> will show up here.</p>
-      <pre id="pinningSample" class="hidden"></pre>
+    <section class="card span-2 alert" id="pinningCard">
+      <div class="card-head">
+        <h2>Pinning alerts</h2>
+        <span class="chip danger hidden" id="pinChip">ACTION</span>
+      </div>
+      <p id="pinningMsg">No pinning detected yet. On JDK 21, blocking inside <code>synchronized</code> pins the virtual thread to its carrier.</p>
+      <div id="pinningList" class="pin-list"></div>
+    </section>
+
+    <section class="card">
+      <div class="card-head"><h2>Recent slow requests</h2></div>
+      <ul class="slow-list" id="slowList"></ul>
+      <p class="empty" id="slowEmpty">None yet — thresholds at 500 ms.</p>
     </section>
   </main>
 
   <footer>
-    Glint 0.1 — virtual-thread server with built-in diagnostics
+    <span>Glint 0.1.0</span>
+    <span class="sep">·</span>
+    <span>zero third-party deps in core</span>
+    <span class="sep">·</span>
+    <a href="api/metrics">api/metrics</a>
   </footer>
   <script src="app.js"></script>
 </body>
