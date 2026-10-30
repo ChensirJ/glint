@@ -50,7 +50,7 @@ cd ..\glint-demo
 |--------|-------------|
 | `glint-core` | HTTP parser (Content-Length + chunked + **multipart**), static mounts (ETag/304), VT server, router, middleware (CORS/accessLog/rateLimit/compress), Trace, Metrics, PinningWatcher, OTLP JSON export hooks (**zero** third-party deps) |
 | `glint-dashboard` | Modern dark `/_vt` UI |
-| `glint-servlet` | Jakarta Servlet 6 adapter (sessions, multipart `Part`s, async stub) |
+| `glint-servlet` | Jakarta Servlet 6 adapter (filter chain, sessions, multipart `Part`s, async stub) |
 | `glint-spring-boot-starter` | Drop-in Tomcat replacement |
 | `glint-examples` | Standalone + Spring Boot demos |
 | `glint-bench` | Glint vs Tomcat harness: `/hello`, static files, and a realistic suite (blocking I/O sweep, JSON + DB wait, mixed traffic, keep-alive vs short connections, uploads) |
@@ -128,6 +128,20 @@ server:
 
 glint:
   diagnostics: true   # /_vt dashboard (default true); virtual threads are always on
+  static:
+    enabled: true
+    prefix: /assets
+    location: classpath:public   # or a directory path, e.g. ./public
+  access-log:
+    enabled: true
+    format: json                 # text | json
+  cors:
+    enabled: true
+    allowed-origin: https://app.example.com
+  rate-limit:
+    enabled: true
+    permits-per-second: 100
+    burst: 50
 
 spring:
   servlet:
@@ -140,8 +154,16 @@ spring:
 |----------|---------|-------|
 | `server.port` | `8080` | Standard Boot listen port. |
 | `glint.diagnostics` | `true` | Mount `/_vt`. |
+| `glint.static.*` | off | `enabled`, `prefix` (`/static`), `location` (path or `classpath:`), `cache-max-entry-bytes`, `cache-max-total-bytes`, `revalidate-millis`, `cache-control`, `precompressed`, `directory-listing`. Served by Glint before Spring MVC. |
+| `glint.access-log.*` | off | `enabled`, `format` = `text` or `json` (JSON Lines). |
+| `glint.cors.*` | off | `enabled`, `allowed-origin`, `allowed-methods`, `allowed-headers`, `exposed-headers`, `allow-credentials`, `max-age-seconds`, `short-circuit-options`. |
+| `glint.rate-limit.*` | off | `enabled`, `permits-per-second` (`100`), `burst` (`50`); per client IP, 429 + `Retry-After`, `/_vt` exempt. |
 | Virtual threads | always on | Not a property; every connection uses a VT. |
-| Static / access log / CORS / rate limit | - | Standalone Glint middleware APIs; not Boot properties yet (use Spring CORS for MVC). |
+
+Servlet filters registered by Spring (`@Bean Filter`, `FilterRegistrationBean`,
+`CharacterEncodingFilter`, Spring Security's filter chain proxy) run in order
+before `DispatcherServlet`, with URL-pattern and servlet-name mappings, and can
+short-circuit the request. Full reference: [docs/spring-boot.md](docs/spring-boot.md).
 
 **Full application** (same shape as bundled `SpringBootDemo`):
 
@@ -194,7 +216,7 @@ Bundled twin of this example: `io.github.glint.examples.SpringBootDemo`
 Auto-configuration: `io.github.glint.spring.GlintServerAutoConfiguration` binds
 `GlintProperties` (`glint.*`) and registers `GlintServletWebServerFactory` via
 `META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports`.
-Sessions, cookies, multipart, and Spring MVC mapping go through `glint-servlet`.
+Sessions, cookies, multipart, the servlet filter chain, and Spring MVC mapping go through `glint-servlet`.
 
 ## HTTP features (0.1+)
 
