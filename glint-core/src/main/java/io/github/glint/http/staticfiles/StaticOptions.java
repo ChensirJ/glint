@@ -35,6 +35,7 @@ public final class StaticOptions {
     private final boolean immutableAll;
     private final long immutableMaxAgeSeconds;
     private final String defaultCacheControl;
+    private final long revalidateMillis;
 
     private StaticOptions(Builder b) {
         this.cacheMaxEntryBytes = b.cacheMaxEntryBytes;
@@ -44,6 +45,7 @@ public final class StaticOptions {
         this.immutableAll = b.immutableAll;
         this.immutableMaxAgeSeconds = b.immutableMaxAgeSeconds;
         this.defaultCacheControl = b.defaultCacheControl;
+        this.revalidateMillis = b.revalidateMillis;
     }
 
     public static StaticOptions defaults() {
@@ -78,6 +80,15 @@ public final class StaticOptions {
         return defaultCacheControl;
     }
 
+    /**
+     * How long a resolved path (file attributes, siblings, validators) is trusted before
+     * the filesystem is checked again. Default 1000 ms; 0 re-checks on every request.
+     * Edits become visible after at most this interval.
+     */
+    public long revalidateMillis() {
+        return revalidateMillis;
+    }
+
     /** True when {@code fileName} should receive the long-lived immutable cache header. */
     public boolean isImmutable(String fileName) {
         if (immutableAll) {
@@ -99,6 +110,16 @@ public final class StaticOptions {
         private boolean immutableAll;
         private long immutableMaxAgeSeconds = DEFAULT_IMMUTABLE_MAX_AGE;
         private String defaultCacheControl;
+        private long revalidateMillis = 1000L;
+
+        /** See {@link StaticOptions#revalidateMillis()}. */
+        public Builder revalidateMillis(long v) {
+            if (v < 0) {
+                throw new IllegalArgumentException("revalidateMillis must be >= 0");
+            }
+            this.revalidateMillis = v;
+            return this;
+        }
 
         public Builder cacheMaxEntryBytes(int v) {
             if (v < 0) {

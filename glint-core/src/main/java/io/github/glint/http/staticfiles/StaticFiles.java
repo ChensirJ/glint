@@ -22,6 +22,8 @@ import java.time.format.DateTimeFormatter;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Static asset mounts for directory roots and classpath folders.
@@ -65,8 +67,21 @@ public final class StaticFiles {
         }
         // One cache per mount so budgets stay predictable.
         StaticFileCache cache = new StaticFileCache(opts.cacheMaxTotalBytes());
-        RouteHandler handler = (req, resp) ->
-                servePath(req, resp, resolveUnderRoot(root, relativePath(req, prefix)), opts, cache);
+        ConcurrentHashMap<String, Resolved> meta = new ConcurrentHashMap<>();
+        long revalidateNanos = TimeUnit.MILLISECONDS.toNanos(opts.revalidateMillis());
+        RouteHandler handler = (req, resp) -> {
+            String rel = relativePath(req, prefix);
+            long now = System.nanoTime();
+            Resolved r = meta.get(rel);
+            if (r == null || revalidateNanos == 0 || now - r.checkedAtNanos() > revalidateNanos) {
+                r = resolve(root, rel, opts, now);
+                if (meta.size() >= MAX_META_ENTRIES) {
+                    meta.clear(); // crude bound; hot entries come back on the next request
+                }
+                meta.put(rel, r);
+            }
+            serveResolved(req, resp, r, opts, cache);
+        };
         register(router, prefix, handler);
     }
 
@@ -138,93 +153,129 @@ public final class StaticFiles {
         router.add(HttpMethod.GET, catchAll, handler);
     }
 
-    private static void servePath(HttpRequest req, HttpResponse resp, Optional<Path> fileOpt,
-                                  StaticOptions opts, StaticFileCache cache) throws Exception {
-        if (fileOpt.isEmpty()) {
-            resp.status(403).text("Forbidden");
-            return;
+    /** Upper bound for cached URL-to-file resolutions per mount. */
+    private static final int MAX_META_ENTRIES = 10_000;
+
+    /**
+     * One on-disk representation (identity, gzip, or br) with its validators
+     * precomputed so the hot path does no formatting or filesystem work.
+     */
+    record Variant(Path path, long size, long mtimeMillis, String etag, String lastModified, String encoding) {
+        static Variant of(Path path, BasicFileAttributes attrs, String encoding) {
+            long size = attrs.size();
+            long mtime = attrs.lastModifiedTime().toMillis();
+            return new Variant(path, size, mtime, weakEtag(size, mtime, encoding),
+                    formatHttpDate(Instant.ofEpochMilli(mtime)), encoding);
         }
-        Path file = fileOpt.get();
-        if (Files.isDirectory(file)) {
-            Path index = file.resolve("index.html").normalize();
-            if (!index.startsWith(file) || !Files.isRegularFile(index)) {
-                resp.status(404).text("Not Found");
-                return;
-            }
-            file = index;
-        }
-        if (!Files.isRegularFile(file)) {
-            resp.status(404).text("Not Found");
-            return;
-        }
-        serveFile(req, resp, file, opts, cache);
     }
 
     /**
-     * Serve one regular file honoring precompressed siblings, conditional GET,
+     * Result of mapping a request path to a file, cached per mount for
+     * {@link StaticOptions#revalidateMillis()} so repeated hits skip all stat calls.
+     */
+    record Resolved(long checkedAtNanos, int status, Variant identity, Variant gzip, Variant br,
+                    String contentType, String cacheControl) {
+    }
+
+    /** Resolve {@code rel} under {@code root}: one readAttributes per candidate, no separate exists checks. */
+    static Resolved resolve(Path root, String rel, StaticOptions opts, long now) {
+        Optional<Path> fileOpt = resolveUnderRoot(root, rel);
+        if (fileOpt.isEmpty()) {
+            return new Resolved(now, 403, null, null, null, null, null);
+        }
+        Path file = fileOpt.get();
+        BasicFileAttributes attrs = readAttrs(file);
+        if (attrs != null && attrs.isDirectory()) {
+            Path index = file.resolve("index.html").normalize();
+            attrs = index.startsWith(file) ? readAttrs(index) : null;
+            file = index;
+        }
+        if (attrs == null || !attrs.isRegularFile()) {
+            return new Resolved(now, 404, null, null, null, null, null);
+        }
+        Variant identity = Variant.of(file, attrs, null);
+        Variant gz = null;
+        Variant br = null;
+        if (opts.precompressed()) {
+            Path gzPath = sibling(file, ".gz");
+            BasicFileAttributes ga = readAttrs(gzPath);
+            if (ga != null && ga.isRegularFile()) {
+                gz = Variant.of(gzPath, ga, "gzip");
+            }
+            Path brPath = sibling(file, ".br");
+            BasicFileAttributes ba = readAttrs(brPath);
+            if (ba != null && ba.isRegularFile()) {
+                br = Variant.of(brPath, ba, "br");
+            }
+        }
+        String fileName = file.getFileName().toString();
+        String ct = MimeTypes.forPath(fileName);
+        String cc = opts.isImmutable(fileName) ? opts.immutableCacheControl() : opts.defaultCacheControl();
+        return new Resolved(now, 200, identity, gz, br,
+                ct == null ? "application/octet-stream" : ct, cc);
+    }
+
+    private static BasicFileAttributes readAttrs(Path p) {
+        try {
+            return Files.readAttributes(p, BasicFileAttributes.class);
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
+    /**
+     * Serve a resolved file honoring precompressed siblings, conditional GET,
      * Range, the small-file cache, and zero-copy for large bodies.
      */
-    static void serveFile(HttpRequest req, HttpResponse resp, Path file,
-                          StaticOptions opts, StaticFileCache cache) throws IOException {
-        String fileName = file.getFileName().toString();
-        String contentType = MimeTypes.forPath(fileName);
-        boolean wantsRange = req.header("range").isPresent() && req.method() == HttpMethod.GET;
+    static void serveResolved(HttpRequest req, HttpResponse resp, Resolved r,
+                              StaticOptions opts, StaticFileCache cache) throws IOException {
+        if (r.status() == 403) {
+            resp.status(403).text("Forbidden");
+            return;
+        }
+        if (r.status() != 200) {
+            resp.status(404).text("Not Found");
+            return;
+        }
+        String contentType = r.contentType();
+        boolean wantsRange = req.method() == HttpMethod.GET && req.header("range").isPresent();
+        boolean hasVariants = r.gzip() != null || r.br() != null;
 
-        // 1) Pick the representation: precompressed sibling or the identity file.
-        //    Range requests always use identity bytes so offsets stay meaningful.
-        Path served = file;
-        String encoding = null;
-        boolean hasVariants = false;
-        if (opts.precompressed()) {
-            Path br = sibling(file, ".br");
-            Path gz = sibling(file, ".gz");
-            boolean brExists = Files.isRegularFile(br);
-            boolean gzExists = Files.isRegularFile(gz);
-            hasVariants = brExists || gzExists;
-            if (!wantsRange && hasVariants) {
-                String ae = req.header("accept-encoding").orElse("");
-                if (brExists && acceptsEncoding(ae, "br")) {
-                    served = br;
-                    encoding = "br";
-                } else if (gzExists && acceptsEncoding(ae, "gzip")) {
-                    served = gz;
-                    encoding = "gzip";
-                }
+        // 1) Pick the representation. Range requests always use identity bytes.
+        Variant v = r.identity();
+        if (!wantsRange && hasVariants) {
+            String ae = req.header("accept-encoding").orElse("");
+            if (r.br() != null && acceptsEncoding(ae, "br")) {
+                v = r.br();
+            } else if (r.gzip() != null && acceptsEncoding(ae, "gzip")) {
+                v = r.gzip();
             }
         }
 
-        BasicFileAttributes attrs = Files.readAttributes(served, BasicFileAttributes.class);
-        long size = attrs.size();
-        long mtime = attrs.lastModifiedTime().toMillis();
-        Instant lastModified = attrs.lastModifiedTime().toInstant();
-        // The ETag describes the bytes on the wire, so each encoding gets its own tag.
-        String etag = weakEtag(size, mtime, encoding);
-
-        resp.header("Content-Type", contentType == null ? "application/octet-stream" : contentType);
-        resp.header("ETag", etag);
-        resp.header("Last-Modified", formatHttpDate(lastModified));
-        if (encoding == null) {
+        resp.header("Content-Type", contentType);
+        resp.header("ETag", v.etag());
+        resp.header("Last-Modified", v.lastModified());
+        if (v.encoding() == null) {
             resp.header("Accept-Ranges", "bytes");
         } else {
-            resp.header("Content-Encoding", encoding);
+            resp.header("Content-Encoding", v.encoding());
             Trace.METRICS.recordStaticPrecompressed();
         }
         if (hasVariants) {
             resp.header("Vary", "Accept-Encoding");
         }
-        if (opts.isImmutable(fileName)) {
-            resp.header("Cache-Control", opts.immutableCacheControl());
-        } else if (opts.defaultCacheControl() != null) {
-            resp.header("Cache-Control", opts.defaultCacheControl());
+        if (r.cacheControl() != null) {
+            resp.header("Cache-Control", r.cacheControl());
         }
 
         // 2) Conditional GET.
-        if (isNotModified(req, etag, lastModified)) {
+        if (isNotModified(req, v.etag(), Instant.ofEpochMilli(v.mtimeMillis()))) {
             Trace.METRICS.recordStaticNotModified();
             resp.status(304).empty();
             return;
         }
 
+        long size = v.size();
         boolean cacheable = size <= opts.cacheMaxEntryBytes();
 
         // 3) Single byte range (identity representation only).
@@ -238,24 +289,23 @@ public final class StaticFiles {
                 resp.status(206).header("Content-Range",
                         "bytes " + range.start() + "-" + range.end() + "/" + size);
                 if (cacheable) {
-                    byte[] data = cache.get(served, size, mtime);
+                    byte[] data = cache.get(v.path(), size, v.mtimeMillis());
                     byte[] slice = new byte[range.length()];
                     System.arraycopy(data, range.start(), slice, 0, range.length());
                     resp.bytes(slice, contentType);
                 } else {
-                    resp.file(served, range.start(), range.length(), contentType);
+                    resp.file(v.path(), range.start(), range.length(), contentType);
                 }
                 return;
             }
-            // Malformed Range: fall through and serve the full body.
         }
 
         // 4) Full body: small files from memory, large files via zero-copy file region.
         resp.status(200);
         if (cacheable) {
-            resp.bytes(cache.get(served, size, mtime), contentType);
+            resp.bytes(cache.get(v.path(), size, v.mtimeMillis()), contentType);
         } else {
-            resp.file(served, 0, size, contentType);
+            resp.file(v.path(), 0, size, contentType);
         }
     }
 

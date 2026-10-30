@@ -42,7 +42,7 @@ class StaticPerfTest {
         app = Glint.create(0)
                 .pinningWatcher(false)
                 .config(ServerConfig.builder().idleTimeoutMs(3000).shutdownWaitMs(1000).build())
-                .staticFiles("/s", dir, StaticOptions.builder().cacheMaxEntryBytes(64 * 1024).build())
+                .staticFiles("/s", dir, StaticOptions.builder().cacheMaxEntryBytes(64 * 1024).revalidateMillis(0).build())
                 .startAsync();
         base = "http://127.0.0.1:" + app.port() + "/s/";
         client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build();

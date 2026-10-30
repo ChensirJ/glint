@@ -6,6 +6,7 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
+import java.nio.channels.GatheringByteChannel;
 import java.nio.channels.WritableByteChannel;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
@@ -406,11 +407,14 @@ public final class HttpResponse {
         // Mixing BufferedOutputStream and SocketChannel on the same Windows socket
         // can stall keep-alive clients; see writeFileRegion().
         if (channel != null) {
-            writeFully(channel, ByteBuffer.wrap(headerBytes));
-            if (!head && filePath != null) {
-                writeFileRegion();
-            } else if (!head && body.length > 0) {
-                writeFully(channel, ByteBuffer.wrap(body));
+            if (!head && filePath == null && body.length > 0) {
+                // Header + body in one gathering write: one syscall, one TCP segment for small bodies.
+                writeFully(channel, ByteBuffer.wrap(headerBytes), ByteBuffer.wrap(body));
+            } else {
+                writeFully(channel, ByteBuffer.wrap(headerBytes));
+                if (!head && filePath != null) {
+                    writeFileRegion();
+                }
             }
         } else {
             out.write(headerBytes);
@@ -426,6 +430,18 @@ public final class HttpResponse {
     private static void writeFully(WritableByteChannel ch, ByteBuffer buf) throws IOException {
         while (buf.hasRemaining()) {
             ch.write(buf);
+        }
+    }
+
+    private static void writeFully(WritableByteChannel ch, ByteBuffer a, ByteBuffer b) throws IOException {
+        if (ch instanceof GatheringByteChannel g) {
+            ByteBuffer[] bufs = {a, b};
+            while (b.hasRemaining()) {
+                g.write(bufs);
+            }
+        } else {
+            writeFully(ch, a);
+            writeFully(ch, b);
         }
     }
 
