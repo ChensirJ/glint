@@ -9,6 +9,10 @@ import org.springframework.boot.web.servlet.server.ServletWebServerFactory;
 
 /**
  * {@link ServletWebServerFactory} that boots Spring MVC on Glint instead of Tomcat.
+ *
+ * <p>Port and address come from {@link AbstractServletWebServerFactory}
+ * ({@code server.port}, {@code server.address}). Diagnostics are controlled by
+ * {@link GlintProperties#isDiagnostics()} / {@link #setDiagnostics(boolean)}.
  */
 public class GlintServletWebServerFactory extends AbstractServletWebServerFactory {
 
@@ -16,6 +20,10 @@ public class GlintServletWebServerFactory extends AbstractServletWebServerFactor
 
     public void setDiagnostics(boolean diagnostics) {
         this.diagnostics = diagnostics;
+    }
+
+    public boolean isDiagnostics() {
+        return diagnostics;
     }
 
     @Override
@@ -29,6 +37,7 @@ public class GlintServletWebServerFactory extends AbstractServletWebServerFactor
             }
         }
         try {
+            context.initServlets();
             return new GlintWebServer(getPort(), context, diagnostics);
         } catch (Exception e) {
             throw new IllegalStateException("Unable to start Glint", e);

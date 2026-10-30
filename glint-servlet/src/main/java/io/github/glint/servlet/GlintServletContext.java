@@ -15,7 +15,9 @@ import java.io.InputStream;
 import java.net.URL;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.EnumSet;
 import java.util.Enumeration;
+import java.util.List;
 import java.util.EventListener;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -32,6 +34,7 @@ public final class GlintServletContext implements ServletContext {
     private final Map<String, Object> attributes = new HashMap<>();
     private final Map<String, Servlet> servletsByName = new HashMap<>();
     private final Map<String, String> mappings = new HashMap<>();
+    private final Map<String, Filter> filtersByName = new HashMap<>();
     private final ClassLoader classLoader = Thread.currentThread().getContextClassLoader();
 
     public Servlet findServletForPath(String path) {
@@ -48,6 +51,32 @@ public final class GlintServletContext implements ServletContext {
 
     public Map<String, Servlet> servlets() {
         return Collections.unmodifiableMap(servletsByName);
+    }
+
+    /**
+     * Initialize every registered servlet (Spring Boot expects the container to
+     * call {@link Servlet#init} after {@code ServletContextInitializer}s run).
+     */
+    public void initServlets() throws ServletException {
+        for (Map.Entry<String, Servlet> e : servletsByName.entrySet()) {
+            String name = e.getKey();
+            Servlet servlet = e.getValue();
+            if (servlet.getServletConfig() != null) {
+                continue;
+            }
+            servlet.init(new SimpleServletConfig(name));
+        }
+    }
+
+    private final class SimpleServletConfig implements jakarta.servlet.ServletConfig {
+        private final String name;
+        private SimpleServletConfig(String name) { this.name = name; }
+        @Override public String getServletName() { return name; }
+        @Override public ServletContext getServletContext() { return GlintServletContext.this; }
+        @Override public String getInitParameter(String name) { return null; }
+        @Override public Enumeration<String> getInitParameterNames() {
+            return Collections.emptyEnumeration();
+        }
     }
 
     @Override public String getContextPath() { return ""; }
@@ -115,12 +144,57 @@ public final class GlintServletContext implements ServletContext {
         }
         return m;
     }
-    @Override public FilterRegistration.Dynamic addFilter(String filterName, String className) { return null; }
-    @Override public FilterRegistration.Dynamic addFilter(String filterName, Filter filter) { return null; }
-    @Override public FilterRegistration.Dynamic addFilter(String filterName, Class<? extends Filter> filterClass) { return null; }
-    @Override public <T extends Filter> T createFilter(Class<T> clazz) { throw new UnsupportedOperationException(); }
-    @Override public FilterRegistration getFilterRegistration(String filterName) { return null; }
-    @Override public Map<String, ? extends FilterRegistration> getFilterRegistrations() { return Map.of(); }
+    @Override
+    public FilterRegistration.Dynamic addFilter(String filterName, String className) {
+        try {
+            Class<?> c = classLoader.loadClass(className);
+            Filter filter = (Filter) c.getDeclaredConstructor().newInstance();
+            return addFilter(filterName, filter);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    @Override
+    public FilterRegistration.Dynamic addFilter(String filterName, Filter filter) {
+        if (filtersByName.containsKey(filterName)) {
+            return null; // already registered
+        }
+        filtersByName.put(filterName, filter);
+        return new FilterReg(filterName);
+    }
+
+    @Override
+    public FilterRegistration.Dynamic addFilter(String filterName, Class<? extends Filter> filterClass) {
+        try {
+            return addFilter(filterName, filterClass.getDeclaredConstructor().newInstance());
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    @Override
+    public <T extends Filter> T createFilter(Class<T> clazz) throws ServletException {
+        try {
+            return clazz.getDeclaredConstructor().newInstance();
+        } catch (Exception e) {
+            throw new ServletException(e);
+        }
+    }
+
+    @Override
+    public FilterRegistration getFilterRegistration(String filterName) {
+        return filtersByName.containsKey(filterName) ? new FilterReg(filterName) : null;
+    }
+
+    @Override
+    public Map<String, ? extends FilterRegistration> getFilterRegistrations() {
+        Map<String, FilterRegistration> m = new HashMap<>();
+        for (String n : filtersByName.keySet()) {
+            m.put(n, new FilterReg(n));
+        }
+        return m;
+    }
     @Override public SessionCookieConfig getSessionCookieConfig() { return null; }
     @Override public void setSessionTrackingModes(Set<SessionTrackingMode> sessionTrackingModes) { }
     @Override public Set<SessionTrackingMode> getDefaultSessionTrackingModes() { return Set.of(); }
@@ -176,5 +250,41 @@ public final class GlintServletContext implements ServletContext {
         @Override public void setMultipartConfig(jakarta.servlet.MultipartConfigElement multipartConfig) { }
         @Override public void setRunAsRole(String roleName) { }
         @Override public Set<String> setServletSecurity(jakarta.servlet.ServletSecurityElement constraint) { return Set.of(); }
+    }
+
+    /**
+     * Records filter registrations so Spring Boot startup succeeds.
+     * Filter chain invocation is not yet implemented in the dispatcher.
+     */
+    private final class FilterReg implements FilterRegistration.Dynamic {
+        private final String name;
+        private final Map<String, String> initParameters = new HashMap<>();
+        private FilterReg(String name) { this.name = name; }
+        @Override public void addMappingForServletNames(EnumSet<jakarta.servlet.DispatcherType> dispatcherTypes,
+                                                        boolean isMatchAfter, String... servletNames) { }
+        @Override public Collection<String> getServletNameMappings() { return List.of(); }
+        @Override public void addMappingForUrlPatterns(EnumSet<jakarta.servlet.DispatcherType> dispatcherTypes,
+                                                       boolean isMatchAfter, String... urlPatterns) { }
+        @Override public Collection<String> getUrlPatternMappings() { return List.of(); }
+        @Override public String getName() { return name; }
+        @Override public String getClassName() {
+            Filter f = filtersByName.get(name);
+            return f == null ? null : f.getClass().getName();
+        }
+        @Override public boolean setInitParameter(String name, String value) {
+            return initParameters.putIfAbsent(name, value) == null;
+        }
+        @Override public String getInitParameter(String name) { return initParameters.get(name); }
+        @Override public Set<String> setInitParameters(Map<String, String> initParameters) {
+            Set<String> conflicts = new HashSet<>();
+            for (Map.Entry<String, String> e : initParameters.entrySet()) {
+                if (!setInitParameter(e.getKey(), e.getValue())) {
+                    conflicts.add(e.getKey());
+                }
+            }
+            return conflicts;
+        }
+        @Override public Map<String, String> getInitParameters() { return Map.copyOf(initParameters); }
+        @Override public void setAsyncSupported(boolean isAsyncSupported) { }
     }
 }
