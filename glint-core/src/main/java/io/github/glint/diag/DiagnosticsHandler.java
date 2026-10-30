@@ -1,10 +1,17 @@
 package io.github.glint.diag;
 
 import io.github.glint.http.HttpMethod;
+import io.github.glint.http.MimeTypes;
+import io.github.glint.obs.PinningWatcher;
+import io.github.glint.obs.SlowLog;
 import io.github.glint.obs.Trace;
 import io.github.glint.router.Router;
+import io.github.glint.util.Json;
 
 import java.io.InputStream;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -25,38 +32,65 @@ public final class DiagnosticsHandler {
         router.add(HttpMethod.GET, base + "/app.js", (req, resp) -> serveDashboard(resp, "/app.js"));
         router.add(HttpMethod.GET, base + "/styles.css", (req, resp) -> serveDashboard(resp, "/styles.css"));
 
-        router.add(HttpMethod.GET, base + "/api/metrics", (req, resp) -> {
-            resp.json(toJson(Trace.METRICS.snapshot()));
-        });
+        router.add(HttpMethod.GET, base + "/api/metrics", (req, resp) ->
+                resp.json(Json.stringify(Trace.METRICS.snapshot())));
 
         router.add(HttpMethod.GET, base + "/api/health", (req, resp) -> {
-            StringBuilder json = new StringBuilder();
-            json.append('{');
-            json.append("\"status\":\"up\",");
-            json.append("\"server\":\"Glint/0.1\",");
-            json.append("\"java\":\"").append(System.getProperty("java.version")).append("\"");
-            json.append('}');
-            resp.json(json.toString());
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("status", "up");
+            m.put("server", "Glint/0.1");
+            m.put("java", System.getProperty("java.version"));
+            m.put("activeRequests", Trace.activeRequests());
+            resp.json(Json.stringify(m));
         });
 
         router.add(HttpMethod.GET, base + "/api/threads", (req, resp) -> {
             long vtEstimate = Thread.getAllStackTraces().keySet().stream()
                     .filter(Thread::isVirtual)
                     .count();
-            StringBuilder json = new StringBuilder();
-            json.append('{');
-            json.append("\"virtualThreadsApprox\":").append(vtEstimate).append(',');
-            json.append("\"pinningEvents\":").append(Trace.METRICS.pinningCount());
-            json.append('}');
-            resp.json(json.toString());
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("virtualThreadsApprox", vtEstimate);
+            m.put("activeRequests", Trace.activeRequests());
+            m.put("pinningEvents", Trace.METRICS.pinningCount());
+            resp.json(Json.stringify(m));
+        });
+
+        router.add(HttpMethod.GET, base + "/api/slow", (req, resp) -> {
+            List<Map<String, Object>> items = new ArrayList<>();
+            for (SlowLog.SlowRequest s : SlowLog.recent()) {
+                Map<String, Object> m = new LinkedHashMap<>();
+                m.put("id", s.id());
+                m.put("path", s.path());
+                m.put("durationMs", s.durationMs());
+                m.put("epochMs", s.epochMs());
+                m.put("spans", s.spans());
+                items.add(m);
+            }
+            Map<String, Object> root = new LinkedHashMap<>();
+            root.put("items", items);
+            resp.json(Json.stringify(root));
+        });
+
+        router.add(HttpMethod.GET, base + "/api/pinning", (req, resp) -> {
+            Map<String, Object> root = new LinkedHashMap<>();
+            root.put("count", Trace.METRICS.pinningCount());
+            root.put("events", PinningWatcher.recentAsMaps());
+            resp.json(Json.stringify(root));
         });
     }
 
     private static void serveDashboard(io.github.glint.http.HttpResponse resp, String resource)
             throws Exception {
         String classpath = "/glint/dashboard" + resource;
-        InputStream in = DiagnosticsHandler.class.getResourceAsStream(classpath);
-        if (in == null) {
+        InputStream stream = DiagnosticsHandler.class.getResourceAsStream(classpath);
+        if (stream == null) {
+            // Also try context classloader (dashboard jar on classpath).
+            ClassLoader cl = Thread.currentThread().getContextClassLoader();
+            if (cl != null) {
+                stream = cl.getResourceAsStream("glint/dashboard" + resource);
+            }
+        }
+        if (stream == null) {
             if (resource.endsWith(".html") || resource.equals("/index.html")) {
                 resp.html(minimalHtml());
             } else {
@@ -65,20 +99,10 @@ public final class DiagnosticsHandler {
             }
             return;
         }
-        try (in) {
+        try (InputStream in = stream) {
             byte[] data = in.readAllBytes();
-            resp.bytes(data, contentType(resource));
+            resp.bytes(data, MimeTypes.forPath(resource));
         }
-    }
-
-    private static String contentType(String resource) {
-        if (resource.endsWith(".js")) {
-            return "application/javascript; charset=utf-8";
-        }
-        if (resource.endsWith(".css")) {
-            return "text/css; charset=utf-8";
-        }
-        return "text/html; charset=utf-8";
     }
 
     private static String minimalHtml() {
@@ -90,55 +114,8 @@ public final class DiagnosticsHandler {
                 + "<li><a href=\"api/metrics\">api/metrics</a></li>"
                 + "<li><a href=\"api/health\">api/health</a></li>"
                 + "<li><a href=\"api/threads\">api/threads</a></li>"
+                + "<li><a href=\"api/slow\">api/slow</a></li>"
+                + "<li><a href=\"api/pinning\">api/pinning</a></li>"
                 + "</ul></body></html>";
-    }
-
-    static String toJson(Object value) {
-        if (value == null) {
-            return "null";
-        }
-        if (value instanceof Number || value instanceof Boolean) {
-            return value.toString();
-        }
-        if (value instanceof String s) {
-            return "\"" + escape(s) + "\"";
-        }
-        if (value instanceof Map<?, ?> map) {
-            StringBuilder sb = new StringBuilder();
-            sb.append('{');
-            boolean first = true;
-            for (Map.Entry<?, ?> e : map.entrySet()) {
-                if (!first) {
-                    sb.append(',');
-                }
-                first = false;
-                sb.append('"').append(escape(String.valueOf(e.getKey()))).append('"')
-                        .append(':').append(toJson(e.getValue()));
-            }
-            sb.append('}');
-            return sb.toString();
-        }
-        return "\"" + escape(String.valueOf(value)) + "\"";
-    }
-
-    private static String escape(String s) {
-        StringBuilder out = new StringBuilder(s.length() + 8);
-        for (int i = 0; i < s.length(); i++) {
-            char c = s.charAt(i);
-            if (c == 92) { // backslash
-                out.append((char) 92).append((char) 92);
-            } else if (c == 34) { // quote
-                out.append((char) 92).append((char) 34);
-            } else if (c == 10) {
-                out.append((char) 92).append('n');
-            } else if (c == 13) {
-                out.append((char) 92).append('r');
-            } else if (c == 9) {
-                out.append((char) 92).append('t');
-            } else {
-                out.append(c);
-            }
-        }
-        return out.toString();
     }
 }

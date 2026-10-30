@@ -10,14 +10,19 @@ import java.util.concurrent.locks.ReentrantLock;
  * Lock-friendly latency metrics.
  * Counts use {@link LongAdder}; latency histograms use {@link ReentrantLock}
  * instead of {@code synchronized} to avoid pinning virtual threads on JDK 21.
+ *
+ * <p>{@link #snapshot()} is intentionally plain Maps/Numbers so it can be
+ * serialized to JSON or fed into an OpenTelemetry exporter without deps in core.
  */
 public final class Metrics {
 
     private final ConcurrentHashMap<String, LongAdder> counts = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Histogram> latency = new ConcurrentHashMap<>();
     private final LongAdder pinningEvents = new LongAdder();
+    private final LongAdder totalRequests = new LongAdder();
 
     public void record(String path, long durNs) {
+        totalRequests.increment();
         counts.computeIfAbsent(path, k -> new LongAdder()).increment();
         latency.computeIfAbsent(path, k -> new Histogram()).add(durNs);
     }
@@ -30,9 +35,15 @@ public final class Metrics {
         return pinningEvents.sum();
     }
 
+    public long totalRequests() {
+        return totalRequests.sum();
+    }
+
     public Map<String, Object> snapshot() {
         Map<String, Object> root = new LinkedHashMap<>();
         root.put("pinningEvents", pinningEvents.sum());
+        root.put("totalRequests", totalRequests.sum());
+        root.put("activeRequests", Trace.activeRequests());
         Map<String, Object> paths = new LinkedHashMap<>();
         for (String path : counts.keySet()) {
             Map<String, Object> m = new LinkedHashMap<>();
@@ -76,7 +87,6 @@ public final class Metrics {
                 for (int i = 0; i < buckets.length; i++) {
                     acc += buckets[i];
                     if (acc >= target) {
-                        // Bucket i covers roughly [2^i, 2^(i+1)) nanoseconds.
                         long midNs = 1L << Math.min(62, i);
                         return midNs / 1_000_000.0;
                     }

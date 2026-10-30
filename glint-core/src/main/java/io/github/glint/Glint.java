@@ -4,6 +4,7 @@ import io.github.glint.diag.DiagnosticsHandler;
 import io.github.glint.http.HttpMethod;
 import io.github.glint.http.HttpRequest;
 import io.github.glint.http.HttpResponse;
+import io.github.glint.http.ServerConfig;
 import io.github.glint.http.VtServer;
 import io.github.glint.middleware.Middleware;
 import io.github.glint.obs.PinningWatcher;
@@ -14,6 +15,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.stream.Collectors;
 
 /**
  * Fluent entry point for a standalone Glint server.
@@ -34,6 +36,7 @@ public final class Glint {
     private final List<Middleware> before = new ArrayList<>();
     private String diagnosticsPath;
     private boolean pinningWatcher = true;
+    private ServerConfig config = ServerConfig.defaults();
     private VtServer server;
 
     private Glint(int port) {
@@ -46,6 +49,11 @@ public final class Glint {
     /** Create a builder bound to the given TCP port (0 = ephemeral). */
     public static Glint create(int port) {
         return new Glint(port);
+    }
+
+    public Glint config(ServerConfig config) {
+        this.config = Objects.requireNonNull(config, "config");
+        return this;
     }
 
     public Glint get(String path, RouteHandler handler) {
@@ -65,6 +73,21 @@ public final class Glint {
 
     public Glint delete(String path, RouteHandler handler) {
         router.add(HttpMethod.DELETE, path, handler);
+        return this;
+    }
+
+    public Glint patch(String path, RouteHandler handler) {
+        router.add(HttpMethod.PATCH, path, handler);
+        return this;
+    }
+
+    public Glint head(String path, RouteHandler handler) {
+        router.add(HttpMethod.HEAD, path, handler);
+        return this;
+    }
+
+    public Glint options(String path, RouteHandler handler) {
+        router.add(HttpMethod.OPTIONS, path, handler);
         return this;
     }
 
@@ -112,7 +135,7 @@ public final class Glint {
             DiagnosticsHandler.install(router, diagnosticsPath);
         }
         RouteHandler pipeline = buildPipeline();
-        server = new VtServer(port, pipeline);
+        server = new VtServer(port, pipeline, config);
         if (pinningWatcher) {
             PinningWatcher.start();
         }
@@ -143,15 +166,20 @@ public final class Glint {
 
     private RouteHandler buildPipeline() {
         RouteHandler matched = (req, resp) -> {
-            RouteHandler h = router.match(req);
-            if (h == null) {
-                resp.status(404).text("Not Found");
+            Router.Match m = router.matchDetailed(req);
+            if (m.methodNotAllowed()) {
+                String allow = m.allowed().stream().map(Enum::name).sorted().collect(Collectors.joining(", "));
+                resp.header("Allow", allow);
+                resp.status(405).json("{\"error\":\"Method Not Allowed\",\"status\":405,\"allow\":\"" + allow + "\"}");
                 return;
             }
-            h.handle(req, resp);
+            if (m.handler() == null) {
+                resp.status(404).json("{\"error\":\"Not Found\",\"status\":404}");
+                return;
+            }
+            m.handler().handle(req, resp);
         };
         RouteHandler chain = matched;
-        // Wrap in reverse so the first registered middleware runs first.
         for (int i = before.size() - 1; i >= 0; i--) {
             Middleware mw = before.get(i);
             RouteHandler next = chain;

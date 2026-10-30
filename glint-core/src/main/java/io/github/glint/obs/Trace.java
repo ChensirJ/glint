@@ -9,6 +9,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Per-request tracing context for JDK 21.
@@ -30,12 +31,22 @@ public final class Trace {
 
     static final ThreadLocal<Ctx> CURRENT = new ThreadLocal<>();
 
-    /** Maps carrier/virtual thread id → context for the pinning watcher. */
+    /** Maps virtual thread id → context for the pinning watcher. */
     static final Map<Long, Ctx> BY_THREAD = new ConcurrentHashMap<>();
 
     public static final Metrics METRICS = new Metrics();
 
+    private static final AtomicInteger ACTIVE = new AtomicInteger();
+
     private Trace() {
+    }
+
+    public static void noteActive(int delta) {
+        ACTIVE.addAndGet(delta);
+    }
+
+    public static int activeRequests() {
+        return ACTIVE.get();
     }
 
     /** Run {@code body} with a fresh request context and record latency metrics. */
