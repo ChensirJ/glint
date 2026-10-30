@@ -14,6 +14,10 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketException;
 import java.net.SocketTimeoutException;
+import java.nio.channels.ServerSocketChannel;
+import java.nio.channels.SocketChannel;
+import java.nio.channels.WritableByteChannel;
+import javax.net.ssl.SSLSocket;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -71,11 +75,23 @@ public final class VtServer implements AutoCloseable {
             ssl.bind(new InetSocketAddress(port), config.backlog());
             ss = ssl;
         } else {
-            ss = new ServerSocket();
+            // Open through NIO so accepted sockets expose a SocketChannel: static files can
+            // then be sent with FileChannel.transferTo (sendfile / TransmitFile). The
+            // socket adaptor keeps the blocking stream API used by the rest of the server.
+            ss = ServerSocketChannel.open().socket();
             ss.setReuseAddress(true);
             ss.bind(new InetSocketAddress(port), config.backlog());
         }
         return ss;
+    }
+
+    /** Plain-TCP sockets accepted via NIO expose a channel; TLS never does zero-copy. */
+    private static WritableByteChannel zeroCopyChannel(Socket socket) {
+        if (socket instanceof SSLSocket) {
+            return null;
+        }
+        SocketChannel ch = socket.getChannel();
+        return ch != null && ch.isBlocking() ? ch : null;
     }
 
     public void start() {
@@ -111,7 +127,7 @@ public final class VtServer implements AutoCloseable {
                 try {
                     req = HttpParser.parse(in, config);
                 } catch (HttpException he) {
-                    HttpResponse err = new HttpResponse(out);
+                    HttpResponse err = new HttpResponse(out, zeroCopyChannel(socket));
                     writeError(err, he.status(), he.getMessage());
                     err.finish();
                     return;
@@ -132,7 +148,7 @@ public final class VtServer implements AutoCloseable {
                     return;
                 }
 
-                HttpResponse resp = new HttpResponse(out);
+                HttpResponse resp = new HttpResponse(out, zeroCopyChannel(socket));
                 if (req.method() == HttpMethod.HEAD) {
                     resp.suppressBody(true);
                 }

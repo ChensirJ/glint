@@ -22,6 +22,13 @@ public final class Metrics {
     private final LongAdder totalRequests = new LongAdder();
     private final LongAdder rateLimitAllowed = new LongAdder();
     private final LongAdder rateLimitRejected = new LongAdder();
+    private final LongAdder staticCacheHits = new LongAdder();
+    private final LongAdder staticCacheMisses = new LongAdder();
+    private final LongAdder staticNotModified = new LongAdder();
+    private final LongAdder staticPrecompressed = new LongAdder();
+    private final LongAdder zeroCopySends = new LongAdder();
+    private final LongAdder zeroCopyBytes = new LongAdder();
+    private final LongAdder streamedFileBytes = new LongAdder();
 
     public void record(String path, long durNs) {
         totalRequests.increment();
@@ -40,6 +47,60 @@ public final class Metrics {
         } else {
             rateLimitRejected.increment();
         }
+    }
+
+    /** Small-file cache lookup (hit = served from memory without reading the file). */
+    public void recordStaticCache(boolean hit) {
+        if (hit) {
+            staticCacheHits.increment();
+        } else {
+            staticCacheMisses.increment();
+        }
+    }
+
+    /** Static response answered with 304 Not Modified. */
+    public void recordStaticNotModified() {
+        staticNotModified.increment();
+    }
+
+    /** A precompressed .br/.gz sibling was served. */
+    public void recordStaticPrecompressed() {
+        staticPrecompressed.increment();
+    }
+
+    /** A file region was sent with FileChannel.transferTo. */
+    public void recordZeroCopy(long bytes) {
+        zeroCopySends.increment();
+        zeroCopyBytes.add(bytes);
+    }
+
+    /** A file region was streamed through a JVM buffer (TLS or no channel). */
+    public void recordStreamedFile(long bytes) {
+        streamedFileBytes.add(bytes);
+    }
+
+    public long staticCacheHits() {
+        return staticCacheHits.sum();
+    }
+
+    public long staticCacheMisses() {
+        return staticCacheMisses.sum();
+    }
+
+    public long staticPrecompressed() {
+        return staticPrecompressed.sum();
+    }
+
+    public long staticNotModified() {
+        return staticNotModified.sum();
+    }
+
+    public long zeroCopySends() {
+        return zeroCopySends.sum();
+    }
+
+    public long zeroCopyBytes() {
+        return zeroCopyBytes.sum();
     }
 
     public long pinningCount() {
@@ -68,6 +129,15 @@ public final class Metrics {
         rl.put("rejected", rateLimitRejected.sum());
         rl.put("total", rateLimitAllowed.sum() + rateLimitRejected.sum());
         root.put("rateLimit", rl);
+        Map<String, Object> st = new LinkedHashMap<>();
+        st.put("cacheHits", staticCacheHits.sum());
+        st.put("cacheMisses", staticCacheMisses.sum());
+        st.put("notModified", staticNotModified.sum());
+        st.put("precompressed", staticPrecompressed.sum());
+        st.put("zeroCopySends", zeroCopySends.sum());
+        st.put("zeroCopyBytes", zeroCopyBytes.sum());
+        st.put("streamedBytes", streamedFileBytes.sum());
+        root.put("staticFiles", st);
         Map<String, Object> paths = new LinkedHashMap<>();
         for (String path : counts.keySet()) {
             Map<String, Object> m = new LinkedHashMap<>();

@@ -4,6 +4,7 @@ import io.github.glint.http.HttpMethod;
 import io.github.glint.http.HttpRequest;
 import io.github.glint.http.HttpResponse;
 import io.github.glint.http.MimeTypes;
+import io.github.glint.obs.Trace;
 import io.github.glint.router.RouteHandler;
 import io.github.glint.router.Router;
 
@@ -12,6 +13,7 @@ import java.io.InputStream;
 import java.net.URL;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.FileTime;
 import java.security.MessageDigest;
 import java.time.Instant;
@@ -28,6 +30,11 @@ import java.util.Optional;
  * {@code bytes=} support, path-traversal protection, weak {@code ETag},
  * {@code Last-Modified}, and conditional {@code 304 Not Modified}
  * ({@code If-None-Match} / {@code If-Modified-Since}).
+ *
+ * <p>Directory mounts additionally provide (see {@link StaticOptions}):
+ * an in-memory cache for small files, zero-copy {@code FileChannel.transferTo}
+ * for larger files on plain-TCP connections, precompressed {@code .br}/{@code .gz}
+ * siblings, and {@code Cache-Control: immutable} for fingerprinted file names.
  */
 public final class StaticFiles {
 
@@ -40,14 +47,26 @@ public final class StaticFiles {
      * serves {@code public/app.js} at {@code /assets/app.js}.
      */
     public static void mountDirectory(Router router, String urlPrefix, Path directory) {
+        mountDirectory(router, urlPrefix, directory, StaticOptions.defaults());
+    }
+
+    /**
+     * Mount a filesystem directory with explicit {@link StaticOptions}
+     * (cache size, precompressed siblings, immutable cache headers).
+     */
+    public static void mountDirectory(Router router, String urlPrefix, Path directory, StaticOptions options) {
         Objects.requireNonNull(router, "router");
         Objects.requireNonNull(directory, "directory");
+        StaticOptions opts = options == null ? StaticOptions.defaults() : options;
         String prefix = normalizePrefix(urlPrefix);
         Path root = directory.toAbsolutePath().normalize();
         if (!Files.isDirectory(root)) {
             throw new IllegalArgumentException("Not a directory: " + root);
         }
-        RouteHandler handler = (req, resp) -> servePath(req, resp, resolveUnderRoot(root, relativePath(req, prefix)));
+        // One cache per mount so budgets stay predictable.
+        StaticFileCache cache = new StaticFileCache(opts.cacheMaxTotalBytes());
+        RouteHandler handler = (req, resp) ->
+                servePath(req, resp, resolveUnderRoot(root, relativePath(req, prefix)), opts, cache);
         register(router, prefix, handler);
     }
 
@@ -119,7 +138,8 @@ public final class StaticFiles {
         router.add(HttpMethod.GET, catchAll, handler);
     }
 
-    private static void servePath(HttpRequest req, HttpResponse resp, Optional<Path> fileOpt) throws Exception {
+    private static void servePath(HttpRequest req, HttpResponse resp, Optional<Path> fileOpt,
+                                  StaticOptions opts, StaticFileCache cache) throws Exception {
         if (fileOpt.isEmpty()) {
             resp.status(403).text("Forbidden");
             return;
@@ -137,11 +157,143 @@ public final class StaticFiles {
             resp.status(404).text("Not Found");
             return;
         }
-        byte[] data = Files.readAllBytes(file);
-        FileTime mtime = Files.getLastModifiedTime(file);
-        String etag = weakEtag(data.length, mtime.toMillis());
-        writeBytes(req, resp, data, MimeTypes.forPath(file.getFileName().toString()),
-                file.getFileName().toString(), etag, mtime.toInstant());
+        serveFile(req, resp, file, opts, cache);
+    }
+
+    /**
+     * Serve one regular file honoring precompressed siblings, conditional GET,
+     * Range, the small-file cache, and zero-copy for large bodies.
+     */
+    static void serveFile(HttpRequest req, HttpResponse resp, Path file,
+                          StaticOptions opts, StaticFileCache cache) throws IOException {
+        String fileName = file.getFileName().toString();
+        String contentType = MimeTypes.forPath(fileName);
+        boolean wantsRange = req.header("range").isPresent() && req.method() == HttpMethod.GET;
+
+        // 1) Pick the representation: precompressed sibling or the identity file.
+        //    Range requests always use identity bytes so offsets stay meaningful.
+        Path served = file;
+        String encoding = null;
+        boolean hasVariants = false;
+        if (opts.precompressed()) {
+            Path br = sibling(file, ".br");
+            Path gz = sibling(file, ".gz");
+            boolean brExists = Files.isRegularFile(br);
+            boolean gzExists = Files.isRegularFile(gz);
+            hasVariants = brExists || gzExists;
+            if (!wantsRange && hasVariants) {
+                String ae = req.header("accept-encoding").orElse("");
+                if (brExists && acceptsEncoding(ae, "br")) {
+                    served = br;
+                    encoding = "br";
+                } else if (gzExists && acceptsEncoding(ae, "gzip")) {
+                    served = gz;
+                    encoding = "gzip";
+                }
+            }
+        }
+
+        BasicFileAttributes attrs = Files.readAttributes(served, BasicFileAttributes.class);
+        long size = attrs.size();
+        long mtime = attrs.lastModifiedTime().toMillis();
+        Instant lastModified = attrs.lastModifiedTime().toInstant();
+        // The ETag describes the bytes on the wire, so each encoding gets its own tag.
+        String etag = weakEtag(size, mtime, encoding);
+
+        resp.header("Content-Type", contentType == null ? "application/octet-stream" : contentType);
+        resp.header("ETag", etag);
+        resp.header("Last-Modified", formatHttpDate(lastModified));
+        if (encoding == null) {
+            resp.header("Accept-Ranges", "bytes");
+        } else {
+            resp.header("Content-Encoding", encoding);
+            Trace.METRICS.recordStaticPrecompressed();
+        }
+        if (hasVariants) {
+            resp.header("Vary", "Accept-Encoding");
+        }
+        if (opts.isImmutable(fileName)) {
+            resp.header("Cache-Control", opts.immutableCacheControl());
+        } else if (opts.defaultCacheControl() != null) {
+            resp.header("Cache-Control", opts.defaultCacheControl());
+        }
+
+        // 2) Conditional GET.
+        if (isNotModified(req, etag, lastModified)) {
+            Trace.METRICS.recordStaticNotModified();
+            resp.status(304).empty();
+            return;
+        }
+
+        boolean cacheable = size <= opts.cacheMaxEntryBytes();
+
+        // 3) Single byte range (identity representation only).
+        if (wantsRange && size > 0 && size <= Integer.MAX_VALUE) {
+            Range range = parseRange(req.header("range").get(), (int) size);
+            if (range != null) {
+                if (!range.satisfiable()) {
+                    resp.status(416).header("Content-Range", "bytes */" + size).empty();
+                    return;
+                }
+                resp.status(206).header("Content-Range",
+                        "bytes " + range.start() + "-" + range.end() + "/" + size);
+                if (cacheable) {
+                    byte[] data = cache.get(served, size, mtime);
+                    byte[] slice = new byte[range.length()];
+                    System.arraycopy(data, range.start(), slice, 0, range.length());
+                    resp.bytes(slice, contentType);
+                } else {
+                    resp.file(served, range.start(), range.length(), contentType);
+                }
+                return;
+            }
+            // Malformed Range: fall through and serve the full body.
+        }
+
+        // 4) Full body: small files from memory, large files via zero-copy file region.
+        resp.status(200);
+        if (cacheable) {
+            resp.bytes(cache.get(served, size, mtime), contentType);
+        } else {
+            resp.file(served, 0, size, contentType);
+        }
+    }
+
+    /** {@code app.js} plus {@code ".gz"} gives {@code app.js.gz} in the same directory. */
+    static Path sibling(Path file, String suffix) {
+        return file.resolveSibling(file.getFileName().toString() + suffix);
+    }
+
+    /**
+     * True when {@code acceptEncoding} lists {@code token} (or {@code *}) with a non-zero q value.
+     */
+    static boolean acceptsEncoding(String acceptEncoding, String token) {
+        if (acceptEncoding == null || acceptEncoding.isBlank()) {
+            return false;
+        }
+        boolean wildcard = false;
+        for (String part : acceptEncoding.toLowerCase(Locale.ROOT).split(",")) {
+            String[] bits = part.trim().split(";");
+            String name = bits[0].trim();
+            double q = 1.0;
+            for (int i = 1; i < bits.length; i++) {
+                String b = bits[i].trim();
+                if (b.startsWith("q=")) {
+                    try {
+                        q = Double.parseDouble(b.substring(2).trim());
+                    } catch (NumberFormatException ignored) {
+                        q = 1.0;
+                    }
+                }
+            }
+            if (name.equals(token)) {
+                return q > 0.0;
+            }
+            if (name.equals("*") && q > 0.0) {
+                wildcard = true;
+            }
+        }
+        return wildcard;
     }
 
     static void writeBytes(HttpRequest req, HttpResponse resp, byte[] data, String contentType, String name)
@@ -192,7 +344,16 @@ public final class StaticFiles {
 
     /** Weak ETag from size + mtime (filesystem mounts). */
     static String weakEtag(long size, long mtimeMillis) {
-        return "W/\"" + Long.toHexString(size) + "-" + Long.toHexString(mtimeMillis) + "\"";
+        return weakEtag(size, mtimeMillis, null);
+    }
+
+    /** Weak ETag that also names the content encoding, so gzip/br/identity never collide. */
+    static String weakEtag(long size, long mtimeMillis, String encoding) {
+        String base = Long.toHexString(size) + "-" + Long.toHexString(mtimeMillis);
+        if (encoding != null && !encoding.isEmpty()) {
+            base = base + "-" + encoding;
+        }
+        return "W/\"" + base + "\"";
     }
 
     /** Strong-ish ETag from SHA-256 of content (classpath mounts). */

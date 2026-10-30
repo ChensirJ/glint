@@ -166,6 +166,14 @@
       document.getElementById("rlSub").textContent =
         rejected + " rejected / " + allowed + " allowed";
 
+      const st = metrics.staticFiles || {};
+      const hits = st.cacheHits != null ? st.cacheHits : 0;
+      const misses = st.cacheMisses != null ? st.cacheMisses : 0;
+      const zc = st.zeroCopySends != null ? st.zeroCopySends : 0;
+      document.getElementById("stHits").textContent = hits;
+      document.getElementById("stSub").textContent =
+        hits + " hits / " + misses + " misses 路 zc " + zc;
+
       const tbody = document.querySelector("#latencyTable tbody");
       tbody.innerHTML = "";
       const keys = Object.keys(paths).sort();
