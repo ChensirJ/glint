@@ -4,6 +4,9 @@ import java.io.BufferedOutputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
+import java.nio.channels.WritableByteChannel;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -12,7 +15,11 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.zip.GZIPOutputStream;
+
+import io.github.glint.obs.Trace;
 
 /**
  * Streaming HTTP/1.1 response writer.
@@ -24,6 +31,13 @@ import java.util.zip.GZIPOutputStream;
  * <p>{@code Set-Cookie} is special-cased: each {@link #cookie(String)} / {@link #header(String, String)}
  * call with name {@code Set-Cookie} appends another cookie line. HTTP/1.1 requires a separate
  * {@code Set-Cookie} header field per cookie (comma-joining is invalid for cookies).
+ *
+ * <p>Besides an in-memory body, a response can carry a <em>file region</em>
+ * ({@link #file(Path, long, long, String)}). On plain-TCP connections the server hands
+ * the socket channel to this class and the region is sent with
+ * {@link FileChannel#transferTo}, letting the OS move bytes from page cache to the
+ * socket (sendfile / TransmitFile) without copying them through a JVM buffer. When no
+ * channel is available (TLS, tests, wrapped streams) the region is streamed instead.
  */
 public final class HttpResponse {
 
@@ -35,9 +49,24 @@ public final class HttpResponse {
     private byte[] body = new byte[0];
     private boolean committed;
     private boolean suppressBody;
+    /** Socket channel for zero-copy sends, or null when only the stream may be used. */
+    private final WritableByteChannel channel;
+    private Path filePath;
+    private long fileOffset;
+    private long fileLength;
 
     public HttpResponse(OutputStream out) {
+        this(out, null);
+    }
+
+    /**
+     * @param out     buffered connection output stream (headers and in-memory bodies)
+     * @param channel the same connection as a channel for zero-copy file sends,
+     *                or {@code null} when zero-copy must not be used (for example TLS)
+     */
+    public HttpResponse(OutputStream out, WritableByteChannel channel) {
         this.out = out instanceof BufferedOutputStream ? out : new BufferedOutputStream(out);
+        this.channel = channel;
         headers.put("Server", "Glint/0.1");
     }
 
@@ -147,18 +176,21 @@ public final class HttpResponse {
 
     public HttpResponse text(String body, Charset charset) {
         this.body = body.getBytes(charset);
+        this.filePath = null;
         headers.putIfAbsent("Content-Type", "text/plain; charset=" + charset.name().toLowerCase(Locale.ROOT));
         return this;
     }
 
     public HttpResponse json(String body) {
         this.body = body.getBytes(StandardCharsets.UTF_8);
+        this.filePath = null;
         headers.putIfAbsent("Content-Type", "application/json; charset=utf-8");
         return this;
     }
 
     public HttpResponse html(String body) {
         this.body = body.getBytes(StandardCharsets.UTF_8);
+        this.filePath = null;
         headers.putIfAbsent("Content-Type", "text/html; charset=utf-8");
         return this;
     }
@@ -166,6 +198,7 @@ public final class HttpResponse {
     public HttpResponse bytes(byte[] data, String contentType) {
         this.body = data == null ? new byte[0] : data;
         if (contentType != null) {
+        this.filePath = null;
             headers.put("Content-Type", contentType);
         }
         return this;
@@ -174,7 +207,36 @@ public final class HttpResponse {
     /** Convenience empty body with status (e.g. 204). */
     public HttpResponse empty() {
         this.body = new byte[0];
+        this.filePath = null;
         return this;
+    }
+
+    /**
+     * Send {@code length} bytes of {@code file} starting at {@code offset} as the body.
+     * The file is opened only when the response is finished, so handlers stay cheap.
+     */
+    public HttpResponse file(Path file, long offset, long length, String contentType) {
+        if (file == null || offset < 0 || length < 0) {
+            throw new IllegalArgumentException("invalid file region");
+        }
+        this.body = new byte[0];
+        this.filePath = file;
+        this.fileOffset = offset;
+        this.fileLength = length;
+        if (contentType != null) {
+            headers.put("Content-Type", contentType);
+        }
+        return this;
+    }
+
+    /** True when the body is a file region rather than in-memory bytes. */
+    public boolean hasFileBody() {
+        return filePath != null;
+    }
+
+    /** True when this connection supports zero-copy file sends. */
+    public boolean zeroCopyCapable() {
+        return channel != null;
     }
 
     /** Current response body bytes (may be empty). */
@@ -185,6 +247,7 @@ public final class HttpResponse {
     /** Replace the buffered body (used by compression middleware). */
     public HttpResponse body(byte[] data) {
         this.body = data == null ? new byte[0] : data;
+        this.filePath = null;
         return this;
     }
 
@@ -199,7 +262,7 @@ public final class HttpResponse {
      * @return {@code true} when the body was compressed
      */
     public boolean negotiateContentEncoding(HttpRequest req) {
-        if (committed || body.length < 256) {
+        if (committed || filePath != null || body.length < 256) {
             return false;
         }
         if (status == 204 || status == 304 || status == 206) {
@@ -225,6 +288,14 @@ public final class HttpResponse {
             }
             this.body = compressed;
             headers.put("Content-Encoding", "gzip");
+            // The gzip bytes differ from identity, so the validator must differ too.
+            String etag = headerValue("ETag");
+            if (etag != null && !etag.endsWith("-gzip\"")) {
+                String bare = etag.startsWith("W/") ? etag.substring(2) : etag;
+                if (bare.length() >= 2 && bare.endsWith("\"")) {
+                    headers.put("ETag", "W/" + bare.substring(0, bare.length() - 1) + "-gzip\"");
+                }
+            }
             addVaryAcceptEncoding();
             return true;
         } catch (IOException e) {
@@ -313,7 +384,8 @@ public final class HttpResponse {
         }
         committed = true;
         boolean head = suppressBody || method == HttpMethod.HEAD;
-        headers.put("Content-Length", Integer.toString(body.length));
+        long contentLength = filePath != null ? fileLength : body.length;
+        headers.put("Content-Length", Long.toString(contentLength));
         headers.putIfAbsent("Connection", "keep-alive");
 
         StringBuilder sb = new StringBuilder(256);
@@ -329,12 +401,98 @@ public final class HttpResponse {
             sb.append("Set-Cookie: ").append(c).append("\r\n");
         }
         sb.append("\r\n");
-        out.write(sb.toString().getBytes(StandardCharsets.US_ASCII));
-        if (!head && body.length > 0) {
-            out.write(body);
+        byte[] headerBytes = sb.toString().getBytes(StandardCharsets.US_ASCII);
+        // When a SocketChannel is available, send the whole response through it.
+        // Mixing BufferedOutputStream and SocketChannel on the same Windows socket
+        // can stall keep-alive clients; see writeFileRegion().
+        if (channel != null) {
+            writeFully(channel, ByteBuffer.wrap(headerBytes));
+            if (!head && filePath != null) {
+                writeFileRegion();
+            } else if (!head && body.length > 0) {
+                writeFully(channel, ByteBuffer.wrap(body));
+            }
+        } else {
+            out.write(headerBytes);
+            if (!head && filePath != null) {
+                writeFileRegion();
+            } else if (!head && body.length > 0) {
+                out.write(body);
+            }
+            out.flush();
         }
-        out.flush();
     }
+
+    private static void writeFully(WritableByteChannel ch, ByteBuffer buf) throws IOException {
+        while (buf.hasRemaining()) {
+            ch.write(buf);
+        }
+    }
+
+    /**
+     * Send the pending file region. Headers sit in the buffered stream, so flush them
+     * first; then prefer {@link FileChannel#transferTo} (zero-copy) and fall back to a
+     * pooled-buffer copy when no channel is available or the OS transfers nothing.
+     */
+    private void writeFileRegion() throws IOException {
+        long pos = fileOffset;
+        long remaining = fileLength;
+        try (FileChannel fc = FileChannel.open(filePath, StandardOpenOption.READ)) {
+            if (channel != null) {
+                long zeroCopied = 0L;
+                while (remaining > 0) {
+                    long n = fc.transferTo(pos, remaining, channel);
+                    if (n <= 0) {
+                        break;
+                    }
+                    pos += n;
+                    remaining -= n;
+                    zeroCopied += n;
+                }
+                if (zeroCopied > 0) {
+                    Trace.METRICS.recordZeroCopy(zeroCopied);
+                }
+                long streamed = 0L;
+                while (remaining > 0) {
+                    ByteBuffer buf = ByteBuffer.allocateDirect(
+                            (int) Math.min(64 * 1024L, Math.max(1L, remaining)));
+                    if (remaining < buf.capacity()) {
+                        buf.limit((int) remaining);
+                    }
+                    int n = fc.read(buf, pos);
+                    if (n <= 0) {
+                        throw new IOException("file shrank while sending: " + filePath);
+                    }
+                    buf.flip();
+                    writeFully(channel, buf);
+                    pos += n;
+                    remaining -= n;
+                    streamed += n;
+                }
+                if (streamed > 0) {
+                    Trace.METRICS.recordStreamedFile(streamed);
+                }
+            } else {
+                // TLS / tests: stream through the buffered OutputStream.
+                out.flush();
+                byte[] buf = new byte[(int) Math.min(64 * 1024L, Math.max(1L, remaining))];
+                while (remaining > 0) {
+                    int want = (int) Math.min(buf.length, remaining);
+                    // FileChannel for positioned reads even on the stream path.
+                    ByteBuffer bb = ByteBuffer.wrap(buf, 0, want);
+                    int n = fc.read(bb, pos);
+                    if (n <= 0) {
+                        throw new IOException("file shrank while sending: " + filePath);
+                    }
+                    out.write(buf, 0, n);
+                    pos += n;
+                    remaining -= n;
+                }
+                Trace.METRICS.recordStreamedFile(fileLength);
+            }
+        }
+    }
+
 
     private static boolean isSetCookie(String name) {
         return name != null && "set-cookie".equalsIgnoreCase(name.trim());

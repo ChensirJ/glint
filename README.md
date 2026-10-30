@@ -84,12 +84,114 @@ Bundled entry point with a real `main`: `io.github.glint.examples.StandaloneDemo
 # Open http://127.0.0.1:8080/hello and http://127.0.0.1:8080/_vt/
 ```
 
+
+## Quick start - Spring Boot 3.2+ (replace Tomcat)
+
+`glint-spring-boot-starter` brings its own `ServletWebServerFactory` and already excludes
+`spring-boot-starter-tomcat`. Point `spring-boot-starter-web` at Glint the same way:
+
+**Maven** (`pom.xml`):
+
+```xml
+<dependencies>
+  <dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-web</artifactId>
+    <exclusions>
+      <exclusion>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-tomcat</artifactId>
+      </exclusion>
+    </exclusions>
+  </dependency>
+  <dependency>
+    <groupId>io.github.chensirj</groupId>
+    <artifactId>glint-spring-boot-starter</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+  </dependency>
+</dependencies>
+```
+
+Until the starter is on Maven Central, install this repo locally first:
+
+```bash
+mvn -q clean install -DskipTests
+```
+
+(`groupId` `io.github.chensirj` is the published coordinate; the in-tree parent POM may still
+use a transitional id until Central publish is finished - prefer `io.github.chensirj` in apps.)
+
+**`application.yml`** (optional - defaults are fine):
+
+```yaml
+server:
+  port: 8080
+spring:
+  servlet:
+    multipart:
+      max-file-size: 10MB
+      max-request-size: 10MB
+```
+
+**Full application** (copy-paste `main`):
+
+```java
+package com.example.demo;
+
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.RestController;
+
+@SpringBootApplication
+public class Application {
+
+    public static void main(String[] args) {
+        SpringApplication.run(Application.class, args);
+    }
+
+    @RestController
+    static class HelloController {
+
+        @GetMapping("/hello")
+        String hello() {
+            return "Hello from Spring Boot on Glint!";
+        }
+
+        @GetMapping("/api/users/{id}")
+        String user(@PathVariable("id") String id) {
+            return "{\"id\":\"" + id + "\",\"via\":\"spring-mvc\"}";
+        }
+    }
+}
+```
+
+Run:
+
+```bash
+mvn spring-boot:run
+# Open http://127.0.0.1:8080/hello and http://127.0.0.1:8080/_vt/
+```
+
+Bundled twin of this example: `io.github.glint.examples.SpringBootDemo`
+
+```bash
+.\scripts\run-spring.ps1
+# or: mvn -pl glint-examples -am -Pspring-demo spring-boot:run
+```
+
+Auto-configuration class: `io.github.glint.spring.GlintServerAutoConfiguration`
+(registered via `META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports`).
+Sessions, cookies, multipart uploads, and Spring MVC mapping work through the
+`glint-servlet` adapter. Diagnostics stay at `/_vt/` by default.
+
 ## HTTP features (0.1+)
 
 - Methods: GET, HEAD, POST, PUT, DELETE, PATCH, OPTIONS
 - Query string, path params `{id}`, greedy `{*path}`
 - Bodies: `Content-Length`, **chunked**, **`multipart/form-data`** (size-limited)
-- **Static mounts**: `Glint.staticFiles(prefix, Path)` and `classpathFiles(prefix, root)` with MIME, HEAD, basic `Range`, path-traversal checks, **ETag** / **Last-Modified**, conditional **304** (`If-None-Match` / `If-Modified-Since`)
+- **Static mounts**: `Glint.staticFiles(prefix, Path[, StaticOptions])` and `classpathFiles(prefix, root)` with MIME, HEAD, `Range`, path-traversal checks, **ETag** / **Last-Modified**, conditional **304**, **small-file cache**, **zero-copy** `FileChannel.transferTo` for large files on plain TCP, **precompressed** `.br`/`.gz` siblings (`Content-Encoding` + `Vary`), and **immutable** `Cache-Control` for fingerprinted names
 - Limits / idle timeout / **fast graceful shutdown** (force-closes keep-alive sockets)
 - Optional **TLS** via `ServerConfig.builder().sslContext(SSLContext)`
 - Diagnostics: `/_vt`, metrics, slow, pinning, **`/_vt/api/otlp/v1/metrics`** (OTLP/HTTP JSON, no SDK dep)
@@ -116,7 +218,7 @@ public class Main {
                 .build()))
             .before(Middlewares.rateLimit(100, 50))
             .before(Middlewares.compress())
-            .staticFiles("/assets", Path.of("public"))
+            .staticFiles("/assets", Path.of("public")) // or StaticOptions.builder()...
             .classpathFiles("/web", "static/web")
             .get("/hello", (req, resp) -> resp.text("ok"))
             .diagnostics("/_vt")
@@ -128,25 +230,38 @@ public class Main {
 
 ## Benchmarks
 
-Side-by-side harness (`glint-bench` / `ComparisonBench`) starts **Glint** and **Tomcat embed 10.1.24** on ephemeral ports, then hits `/hello` with the same Java `HttpClient` (HTTP/1.1, virtual-thread workers).
+Side-by-side harness (`glint-bench`) starts **Glint** and **Tomcat embed 10.1.24** on ephemeral ports, then hits the same paths with Java `HttpClient` (HTTP/1.1, virtual-thread workers). Defaults: warmup 2s, measure 5s, concurrency 64.
 
-### Latest numbers (maintainer machine)
+Full tables: [`docs/bench-results.md`](docs/bench-results.md).
 
-Captured **2026-10-30 14:17:49 CST** (Asia/Shanghai). Full notes: [`docs/bench-results.md`](docs/bench-results.md).
+### `/hello` (text)
+
+Captured **2026-10-30 15:21:06 CST** (Asia/Shanghai).
 
 | Server | req/s | errors | p50 (ms) | p99 (ms) | max (ms) |
 |--------|------:|-------:|---------:|---------:|---------:|
-| Glint | 52,281 | 0 | 0.95 | 4.84 | 14.43 |
-| Tomcat embed | 46,779 | 0 | 1.20 | 4.37 | 12.50 |
+| Glint | 58,887 | 0 | 1.01 | 2.85 | 9.27 |
+| Tomcat embed | 58,084 | 0 | 1.03 | 2.79 | 26.29 |
 
-**Delta (this run):** Glint is about **+11.8%** req/s vs Tomcat embed; p50 lower; p99/max similar.
+### Static files (Glint `staticFiles` vs Tomcat `DefaultServlet`)
 
-> Numbers are machine-local and not a guarantee of production ranking. At lower concurrency Tomcat may lead -- re-run before quoting.
+Captured **2026-10-30 15:21:18 CST** (Asia/Shanghai). Sizes 1 KiB / 100 KiB / 2 MiB.
+
+| Size | Glint req/s | Tomcat req/s | Note |
+|------|------------:|-------------:|------|
+| 1 KiB | 9,214 | 20,081 | Tomcat ahead on tiny hot files this run |
+| 100 KiB | 7,012 | 7,353 | Roughly tied |
+| 2 MiB | 333 | 371 | Roughly tied (Glint uses zero-copy `transferTo`) |
+
+> Numbers are machine-local and not a guarantee of production ranking. Re-run before quoting. Static results are honest: Glint trades some tiny-file throughput for ETag/304, precompressed siblings, and `/_vt` cache metrics.
 
 ```bash
 mvn -pl glint-bench -am -q package
 mvn -pl glint-bench -q exec:java -Dexec.mainClass=io.github.glint.bench.ComparisonBench -Dexec.args="2 5 64"
+# StaticBench: java -cp glint-bench/target/classes:glint-core/target/classes:... io.github.glint.bench.StaticBench
+.\scripts\run-bench.ps1
 ```
+
 
 ## OpenTelemetry
 

@@ -5,6 +5,7 @@ import io.github.glint.http.HttpMethod;
 import io.github.glint.http.ServerConfig;
 import io.github.glint.http.VtServer;
 import io.github.glint.http.staticfiles.StaticFiles;
+import io.github.glint.http.staticfiles.StaticOptions;
 import io.github.glint.http.websocket.WebSocketHandler;
 import io.github.glint.http.websocket.WebSocketSupport;
 import io.github.glint.middleware.Middleware;
@@ -103,6 +104,16 @@ public final class Glint {
      */
     public Glint staticFiles(String urlPrefix, Path directory) {
         StaticFiles.mountDirectory(router, urlPrefix, directory);
+        return this;
+    }
+
+    /**
+     * Serve files under {@code directory} with explicit tuning: small-file cache size,
+     * precompressed {@code .br}/{@code .gz} siblings, and immutable cache headers for
+     * fingerprinted names. Large files use zero-copy sends on plain-TCP connections.
+     */
+    public Glint staticFiles(String urlPrefix, Path directory, StaticOptions options) {
+        StaticFiles.mountDirectory(router, urlPrefix, directory, options);
         return this;
     }
 
