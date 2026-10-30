@@ -47,6 +47,15 @@ public final class Route {
         if (request.method() != method) {
             return false;
         }
+        return bindPath(request);
+    }
+
+    /** Path-only match (ignores HTTP method); still binds path params on success. */
+    public boolean matchesPath(HttpRequest request) {
+        return bindPath(request);
+    }
+
+    private boolean bindPath(HttpRequest request) {
         Matcher m = regex.matcher(request.path());
         if (!m.matches()) {
             return false;
@@ -60,7 +69,7 @@ public final class Route {
     private static boolean isRegexSpecial(char c) {
         return switch (c) {
             case '.', '+', '*', '?', '^', '$', '(', ')', '[', ']', '{', '}', '|' -> true;
-            default -> c == 92; // backslash
+            default -> c == '\\';
         };
     }
 
@@ -80,7 +89,7 @@ public final class Route {
                 i = end + 1;
             } else {
                 if (isRegexSpecial(c)) {
-                    sb.append((char) 92);
+                    sb.append('\\');
                 }
                 sb.append(c);
                 i++;
