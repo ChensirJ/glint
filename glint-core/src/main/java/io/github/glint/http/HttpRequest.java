@@ -40,6 +40,7 @@ public final class HttpRequest {
     private Map<String, String> queryParams;
     private byte[] cachedBody;
     private boolean streamOpened;
+    private String remoteAddress = "";
 
     /**
      * Construct a request whose body is already fully buffered (tests and
@@ -125,8 +126,22 @@ public final class HttpRequest {
         return Optional.ofNullable(queryParams().get(name));
     }
 
+
     public Map<String, String> headers() {
         return headers;
+    }
+
+    /**
+     * Client address as seen by the server (may be empty in unit tests).
+     * Set by {@link VtServer} when accepting a connection.
+     */
+    public String remoteAddress() {
+        return remoteAddress == null ? "" : remoteAddress;
+    }
+
+    /** Package-visible: filled in by the connection loop. */
+    void remoteAddress(String address) {
+        this.remoteAddress = address == null ? "" : address;
     }
 
     public Optional<String> header(String name) {

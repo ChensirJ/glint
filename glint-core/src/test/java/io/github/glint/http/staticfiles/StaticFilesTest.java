@@ -185,4 +185,61 @@ class StaticFilesTest {
         StaticFiles.Range bad = StaticFiles.parseRange("bytes=100-200", 10);
         assertFalse(bad.satisfiable());
     }
+    @Test
+    void directoryListingOffByDefault(@TempDir Path dir) throws Exception {
+        Files.createDirectories(dir.resolve("sub"));
+        Files.writeString(dir.resolve("a.txt"), "hi", StandardCharsets.UTF_8);
+        glint = Glint.create(0)
+                .pinningWatcher(false)
+                .config(ServerConfig.builder().idleTimeoutMs(3_000).shutdownWaitMs(1_000).build())
+                .staticFiles("/files", dir)
+                .startAsync();
+        HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build();
+        HttpResponse<String> r = client.send(
+                HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + glint.port() + "/files/"))
+                        .timeout(Duration.ofSeconds(3)).GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(404, r.statusCode());
+    }
+
+    @Test
+    void directoryListingHtmlAndJson(@TempDir Path dir) throws Exception {
+        Files.createDirectories(dir.resolve("sub"));
+        Files.writeString(dir.resolve("a.txt"), "hi", StandardCharsets.UTF_8);
+        Files.writeString(dir.resolve("b&c.txt"), "x", StandardCharsets.UTF_8);
+        glint = Glint.create(0)
+                .pinningWatcher(false)
+                .config(ServerConfig.builder().idleTimeoutMs(3_000).shutdownWaitMs(1_000).build())
+                .staticFiles("/files", dir, StaticOptions.builder().directoryListing(true).build())
+                .startAsync();
+        int port = glint.port();
+        HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build();
+
+        HttpResponse<String> html = client.send(
+                HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/files/"))
+                        .timeout(Duration.ofSeconds(3))
+                        .header("Accept", "text/html")
+                        .GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, html.statusCode());
+        assertTrue(html.headers().firstValue("content-type").orElse("").contains("text/html"));
+        assertTrue(html.body().contains("a.txt"));
+        assertTrue(html.body().contains("sub/"));
+        assertTrue(html.body().contains("b&amp;c.txt"), html.body());
+
+        HttpResponse<String> json = client.send(
+                HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/files/?format=json"))
+                        .timeout(Duration.ofSeconds(3)).GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, json.statusCode());
+        assertTrue(json.headers().firstValue("content-type").orElse("").contains("application/json"));
+        assertTrue(json.body().contains("\"name\":\"a.txt\""));
+        assertTrue(json.body().contains("\"type\":\"dir\""));
+        assertTrue(json.body().contains("\"name\":\"sub\""));
+    }
+
+    @Test
+    void htmlEscapeEscapesMarkup() {
+        assertEquals("a&amp;b&lt;c&gt;", StaticFiles.htmlEscape("a&b<c>"));
+    }
 }

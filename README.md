@@ -191,12 +191,13 @@ Sessions, cookies, multipart uploads, and Spring MVC mapping work through the
 - Methods: GET, HEAD, POST, PUT, DELETE, PATCH, OPTIONS
 - Query string, path params `{id}`, greedy `{*path}`
 - Bodies: `Content-Length`, **chunked**, **`multipart/form-data`** (size-limited); stream large uploads with `req.bodyStream()` / `req.bodyChannel()` (or buffer with `bodyBytes()` / `bodyText()`)
-- **Static mounts**: `Glint.staticFiles(prefix, Path[, StaticOptions])` and `classpathFiles(prefix, root)` with MIME, HEAD, `Range`, path-traversal checks, **ETag** / **Last-Modified**, conditional **304**, **small-file cache** plus a per-path metadata cache (no filesystem calls on hot hits; edits visible within `StaticOptions.revalidateMillis`, default 1000 ms), **zero-copy** `FileChannel.transferTo` for large files on plain TCP, **precompressed** `.br`/`.gz` siblings (`Content-Encoding` + `Vary`), and **immutable** `Cache-Control` for fingerprinted names
+- **SSE**: `SseEmitter.start(resp)` writes `text/event-stream` with `event` / `id` / `data` / `retry` and `: comment` keep-alives; connection closes cleanly when the emitter closes
+- **Static mounts**: `Glint.staticFiles(prefix, Path[, StaticOptions])` and `classpathFiles(prefix, root)` with MIME, HEAD, `Range`, path-traversal checks, **ETag** / **Last-Modified**, conditional **304**, **small-file cache** plus a per-path metadata cache (no filesystem calls on hot hits; edits visible within `StaticOptions.revalidateMillis`, default 1000 ms), **zero-copy** `FileChannel.transferTo` for large files on plain TCP, **precompressed** `.br`/`.gz` siblings (`Content-Encoding` + `Vary`), **immutable** `Cache-Control` for fingerprinted names, and optional **directory listing** (`StaticOptions.directoryListing(true)`, off by default; HTML or JSON)
 - Limits / idle timeout / **fast graceful shutdown** (force-closes keep-alive sockets)
 - Optional **TLS** via `ServerConfig.builder().sslContext(SSLContext)`
 - Diagnostics: `/_vt`, metrics, slow, pinning, **`/_vt/api/otlp/v1/metrics`** (OTLP/HTTP JSON, no SDK dep)
 - ObsExporter SPI (`ServiceLoader`) for custom exporters
-- Middleware: **CORS** (`CorsOptions`), **accessLog** / `requestLogging`, **token-bucket rateLimit** (Retry-After + `/_vt` counters), **gzip compress** (`Accept-Encoding`; no Brotli without native deps), exception -> JSON
+- Middleware: **CORS** (`CorsOptions`), **accessLog** / `requestLogging`, **accessLogJson** (JSON Lines with status/method/path/duration/bytes/remote), **token-bucket rateLimit** (Retry-After + `/_vt` counters), **gzip compress** (`Accept-Encoding`; no Brotli without native deps), exception -> JSON
 - Cookies: multiple **`Set-Cookie`** header lines (`resp.cookie(...)` / `addCookie`)
 - WebSocket / HTTP Upgrade via `Glint.websocket(path, handler)` (RFC 6455, HTTP/1.1): **text**, **binary**, **ping/pong** (auto-reply), **close codes**, **fragmented message reassembly**
 
@@ -319,6 +320,9 @@ Requires **JDK 21+** and **Maven 3.9+**.
 - [x] Rate-limit counters on `/_vt` (`rateLimit.allowed` / `rejected`)
 - [x] Multi `Set-Cookie` header support (`HttpResponse.cookie`)
 - [x] Streaming request bodies (`bodyStream()` / `bodyChannel()`; `bodyBytes()` still buffers when called)
+- [x] Server-Sent Events (SseEmitter / SseEvent)
+- [x] JSON Lines access log (Middlewares.accessLogJson())
+- [x] Optional static directory listing (StaticOptions.directoryListing)
 - [ ] Linux re-run of the realistic suite and an open-loop (wrk2-style) generator
 - [ ] Published JMH vs Tomcat / Undertow / Jetty with CI numbers
 - [ ] GraalVM native-image recipe for standalone mode

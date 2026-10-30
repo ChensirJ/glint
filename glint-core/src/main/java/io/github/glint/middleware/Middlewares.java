@@ -98,6 +98,48 @@ public final class Middlewares {
     }
 
     /**
+     * JSON Lines access log to stdout. Each request becomes one JSON object with
+     * {@code ts}, {@code method}, {@code path}, {@code status}, {@code durationMs},
+     * {@code bytes}, and {@code remote}.
+     */
+    public static Middleware accessLogJson() {
+        return accessLogJson(System.out);
+    }
+
+    /** JSON Lines access log to {@code out}. */
+    public static Middleware accessLogJson(PrintStream out) {
+        Objects.requireNonNull(out, "out");
+        return accessLogJson(line -> out.println(line));
+    }
+
+    /**
+     * JSON Lines access log with a custom sink (one JSON object per request, no
+     * surrounding array).
+     */
+    public static Middleware accessLogJson(Consumer<String> sink) {
+        Objects.requireNonNull(sink, "sink");
+        return (req, resp, next) -> {
+            long t = System.nanoTime();
+            try {
+                next.handle(req, resp);
+            } finally {
+                double ms = (System.nanoTime() - t) / 1_000_000.0;
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("ts", java.time.Instant.now().toString());
+                row.put("method", req.method().name());
+                row.put("path", req.rawTarget());
+                row.put("status", resp.status());
+                row.put("durationMs", Math.round(ms * 10.0) / 10.0);
+                row.put("bytes", resp.bytesWritten());
+                row.put("remote", req.remoteAddress() == null || req.remoteAddress().isEmpty()
+                        ? "-"
+                        : req.remoteAddress());
+                sink.accept(Json.stringify(row));
+            }
+        };
+    }
+
+    /**
      * Negotiate response compression after the handler runs.
      * Currently {@code gzip} only (JDK built-in). Brotli is not enabled
      * without native/third-party encoders.

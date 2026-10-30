@@ -129,6 +129,31 @@ class MiddlewaresTest {
         assertEquals(payload, plain.body());
     }
 
+    @Test
+    void accessLogJsonIncludesStatusPathBytesAndRemote() throws Exception {
+        List<String> lines = new ArrayList<>();
+        glint = Glint.create(0)
+                .pinningWatcher(false)
+                .config(ServerConfig.builder().idleTimeoutMs(3_000).shutdownWaitMs(1_000).build())
+                .before(Middlewares.accessLogJson(lines::add))
+                .get("/ping", (req, resp) -> resp.text("pong"))
+                .startAsync();
+
+        int port = glint.port();
+        HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build();
+        HttpResponse<String> r = client.send(get(port, "/ping"), HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, r.statusCode());
+        assertEquals("pong", r.body());
+        assertFalse(lines.isEmpty());
+        String json = lines.get(lines.size() - 1);
+        assertTrue(json.contains("\"method\":\"GET\""), json);
+        assertTrue(json.contains("\"path\":\"/ping\""), json);
+        assertTrue(json.contains("\"status\":200"), json);
+        assertTrue(json.contains("\"durationMs\":"), json);
+        assertTrue(json.contains("\"bytes\":4"), json);
+        assertTrue(json.contains("\"remote\":"), json);
+        assertTrue(json.contains("\"ts\":"), json);
+    }
     private static HttpRequest get(int port, String path) {
 
         return HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + path))

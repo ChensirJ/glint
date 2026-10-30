@@ -137,6 +137,7 @@ public final class VtServer implements AutoCloseable {
                 if (req == null) {
                     return;
                 }
+                req.remoteAddress(clientAddress(socket));
 
                 // WebSocket upgrade takes over the socket for the rest of its life.
                 try {
@@ -182,7 +183,8 @@ public final class VtServer implements AutoCloseable {
                 } catch (IOException ioe) {
                     return;
                 }
-                if (!req.keepAlive() || !running.get()) {
+                // Streaming (SSE) responses set Connection: close; do not reuse the socket.
+                if (resp.closeConnection() || !req.keepAlive() || !running.get()) {
                     return;
                 }
             }
@@ -193,6 +195,17 @@ public final class VtServer implements AutoCloseable {
         } finally {
             openSockets.remove(socket);
         }
+    }
+
+    private static String clientAddress(Socket socket) {
+        try {
+            if (socket.getInetAddress() != null) {
+                return socket.getInetAddress().getHostAddress();
+            }
+        } catch (Exception ignored) {
+            // best effort
+        }
+        return "";
     }
 
     private static void writeError(HttpResponse resp, int status, String message) {

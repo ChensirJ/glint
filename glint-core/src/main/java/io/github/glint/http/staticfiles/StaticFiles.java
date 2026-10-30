@@ -19,7 +19,14 @@ import java.security.MessageDigest;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import io.github.glint.util.Json;
+import java.util.stream.Collectors;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
@@ -174,24 +181,35 @@ public final class StaticFiles {
      * {@link StaticOptions#revalidateMillis()} so repeated hits skip all stat calls.
      */
     record Resolved(long checkedAtNanos, int status, Variant identity, Variant gzip, Variant br,
-                    String contentType, String cacheControl) {
+                    String contentType, String cacheControl, Path listingDir) {
+        boolean isListing() {
+            return listingDir != null;
+        }
     }
 
     /** Resolve {@code rel} under {@code root}: one readAttributes per candidate, no separate exists checks. */
     static Resolved resolve(Path root, String rel, StaticOptions opts, long now) {
         Optional<Path> fileOpt = resolveUnderRoot(root, rel);
         if (fileOpt.isEmpty()) {
-            return new Resolved(now, 403, null, null, null, null, null);
+            return new Resolved(now, 403, null, null, null, null, null, null);
         }
         Path file = fileOpt.get();
         BasicFileAttributes attrs = readAttrs(file);
         if (attrs != null && attrs.isDirectory()) {
-            Path index = file.resolve("index.html").normalize();
-            attrs = index.startsWith(file) ? readAttrs(index) : null;
-            file = index;
+            Path dir = file;
+            Path index = dir.resolve("index.html").normalize();
+            BasicFileAttributes indexAttrs = index.startsWith(dir) ? readAttrs(index) : null;
+            if (indexAttrs != null && indexAttrs.isRegularFile()) {
+                file = index;
+                attrs = indexAttrs;
+            } else if (opts.directoryListing()) {
+                return new Resolved(now, 200, null, null, null, null, null, dir);
+            } else {
+                return new Resolved(now, 404, null, null, null, null, null, null);
+            }
         }
         if (attrs == null || !attrs.isRegularFile()) {
-            return new Resolved(now, 404, null, null, null, null, null);
+            return new Resolved(now, 404, null, null, null, null, null, null);
         }
         Variant identity = Variant.of(file, attrs, null);
         Variant gz = null;
@@ -212,7 +230,7 @@ public final class StaticFiles {
         String ct = MimeTypes.forPath(fileName);
         String cc = opts.isImmutable(fileName) ? opts.immutableCacheControl() : opts.defaultCacheControl();
         return new Resolved(now, 200, identity, gz, br,
-                ct == null ? "application/octet-stream" : ct, cc);
+                ct == null ? "application/octet-stream" : ct, cc, null);
     }
 
     private static BasicFileAttributes readAttrs(Path p) {
@@ -235,6 +253,10 @@ public final class StaticFiles {
         }
         if (r.status() != 200) {
             resp.status(404).text("Not Found");
+            return;
+        }
+        if (r.isListing()) {
+            serveDirectoryListing(req, resp, r.listingDir());
             return;
         }
         String contentType = r.contentType();
@@ -488,6 +510,115 @@ public final class StaticFiles {
         }
     }
 
+
+    /**
+     * Safe directory listing: only direct children under the resolved directory,
+     * HTML-escaped names, no {@code ..} entries that escape the mount.
+     * JSON when {@code Accept} prefers {@code application/json} or {@code ?format=json}.
+     */
+    static void serveDirectoryListing(HttpRequest req, HttpResponse resp, Path dir) throws IOException {
+        List<Map<String, Object>> entries = new ArrayList<>();
+        try (var stream = Files.list(dir)) {
+            List<Path> children = stream.sorted(Comparator.comparing(p -> p.getFileName().toString().toLowerCase(Locale.ROOT)))
+                    .collect(Collectors.toList());
+            for (Path child : children) {
+                String name = child.getFileName().toString();
+                if (name.isEmpty() || name.contains("/") || name.contains("\\") || name.contains("\0")
+                        || name.equals(".") || name.equals("..")) {
+                    continue;
+                }
+                BasicFileAttributes a;
+                try {
+                    a = Files.readAttributes(child, BasicFileAttributes.class);
+                } catch (IOException e) {
+                    continue;
+                }
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("name", name);
+                if (a.isDirectory()) {
+                    row.put("type", "dir");
+                    row.put("size", 0);
+                } else if (a.isRegularFile()) {
+                    row.put("type", "file");
+                    row.put("size", a.size());
+                } else {
+                    continue;
+                }
+                entries.add(row);
+            }
+        }
+
+        boolean wantJson = wantsJsonListing(req);
+        if (wantJson) {
+            Map<String, Object> body = new LinkedHashMap<>();
+            body.put("path", req.path());
+            body.put("entries", entries);
+            resp.status(200)
+                    .header("Cache-Control", "no-cache")
+                    .json(Json.stringify(body));
+            return;
+        }
+
+        StringBuilder html = new StringBuilder();
+        String titlePath = htmlEscape(req.path());
+        html.append("<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\"><title>Index of ")
+                .append(titlePath).append("</title></head><body>\n");
+        html.append("<h1>Index of ").append(titlePath).append("</h1>\n<ul>\n");
+        if (!"/".equals(req.path()) && !req.path().isEmpty()) {
+            html.append("<li><a href=\"../\">../</a></li>\n");
+        }
+        for (Map<String, Object> row : entries) {
+            String name = String.valueOf(row.get("name"));
+            boolean dirEntry = "dir".equals(row.get("type"));
+            String href = htmlEscape(name) + (dirEntry ? "/" : "");
+            String label = htmlEscape(name) + (dirEntry ? "/" : "");
+            html.append("<li><a href=\"").append(href).append("\">").append(label).append("</a>");
+            if (!dirEntry) {
+                html.append(" <span>").append(row.get("size")).append("</span>");
+            }
+            html.append("</li>\n");
+        }
+        html.append("</ul>\n</body></html>\n");
+        resp.status(200)
+                .header("Cache-Control", "no-cache")
+                .html(html.toString());
+    }
+
+    static boolean wantsJsonListing(HttpRequest req) {
+        if (req.queryParam("format").map(f -> "json".equalsIgnoreCase(f)).orElse(false)) {
+            return true;
+        }
+        String accept = req.header("accept").orElse("");
+        String lower = accept.toLowerCase(Locale.ROOT);
+        int json = lower.indexOf("application/json");
+        int html = lower.indexOf("text/html");
+        if (json < 0) {
+            return false;
+        }
+        if (html < 0) {
+            return true;
+        }
+        return json < html;
+    }
+
+    static String htmlEscape(String s) {
+        if (s == null) {
+            return "";
+        }
+        StringBuilder out = new StringBuilder(s.length() + 8);
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            switch (c) {
+                case '&' -> out.append("&amp;");
+                case '<' -> out.append("&lt;");
+                case '>' -> out.append("&gt;");
+                case '"' -> out.append("&quot;");
+                case '\'' -> out.append("&#39;");
+                default -> out.append(c);
+            }
+        }
+        return out.toString();
+    }
     /**
      * Resolve {@code relative} under {@code root}; empty optional means traversal / missing.
      */
