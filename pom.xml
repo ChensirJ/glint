@@ -10,7 +10,7 @@
   <packaging>pom</packaging>
 
   <name>Glint</name>
-  <description>Drop-in virtual-thread server with built-in diagnostics — see why your request is slow.</description>
+  <description>Drop-in virtual-thread server with built-in diagnostics  -  see why your request is slow.</description>
   <url>https://github.com/ChensirJ/glint</url>
 
   <licenses>

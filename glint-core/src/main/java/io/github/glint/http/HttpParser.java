@@ -169,7 +169,7 @@ public final class HttpParser {
             if (c1 == '\r' && c2 == '\n') {
                 // ok
             } else if (c1 == '\n') {
-                // bare LF — tolerate
+                // bare LF  -  tolerate
             } else if (c1 < 0) {
                 throw new EOFException("Unexpected EOF after chunk");
             } else {

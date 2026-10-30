@@ -4,7 +4,7 @@ import java.util.Collection;
 import java.util.Map;
 
 /**
- * Tiny JSON serializer for Maps/Lists/scalars — enough for diagnostics APIs
+ * Tiny JSON serializer for Maps/Lists/scalars  -  enough for diagnostics APIs
  * without third-party dependencies in glint-core.
  */
 public final class Json {

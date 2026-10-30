@@ -150,7 +150,7 @@ public final class MultipartParser {
         }
         Map<String, String> headers = parsePartHeaders(raw, 0, headerEnd);
         byte[] data = slice(raw, bodyStart, raw.length);
-        // Strip trailing CRLF that some encoders leave inside the part slice —
+        // Strip trailing CRLF that some encoders leave inside the part slice  - 
         // already handled by partEnd adjustment; keep data as-is.
 
         if (data.length > config.maxMultipartPartBytes()) {

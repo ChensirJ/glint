@@ -36,7 +36,7 @@ public final class GlintWebServer implements WebServer {
                 HttpMethod.GET, HttpMethod.POST, HttpMethod.PUT, HttpMethod.DELETE, HttpMethod.PATCH}) {
             router.add(m, "/**", dispatcher);
         }
-        // Our router does not support /** glob — register a custom matcher via wrap.
+        // Our router does not support /** glob  -  register a custom matcher via wrap.
         // Instead, use a dedicated catch-all handler through VtServer directly.
         this.server = new VtServer(port, (req, resp) -> {
             if (req.path().startsWith("/_vt") && diagnostics) {

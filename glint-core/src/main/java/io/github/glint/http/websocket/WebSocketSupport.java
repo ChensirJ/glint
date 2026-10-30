@@ -17,8 +17,8 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * HTTP/1.1 {@code Upgrade: websocket} handshake and frame pump for Glint.
  *
- * <p>Supports text echo and simple application handlers. Fragmented messages
- * and extensions are intentionally out of scope for 0.1.
+ * <p>Supports text, binary, ping/pong, and close frames with status codes.
+ * Fragmented messages and extensions are intentionally out of scope for 0.1.
  */
 public final class WebSocketSupport {
 
@@ -71,7 +71,7 @@ public final class WebSocketSupport {
 
     /**
      * Write the {@code 101 Switching Protocols} response.
-     * Does not close the streams — the caller enters the frame loop next.
+     * Does not close the streams  -  the caller enters the frame loop next.
      */
     public static void writeHandshake(OutputStream out, HttpRequest req) throws IOException {
         String key = req.header("sec-websocket-key").orElseThrow();
@@ -111,7 +111,7 @@ public final class WebSocketSupport {
             pump(session, handler);
         } finally {
             session.markClosed();
-            handler.onClose(session);
+            handler.onClose(session, session.closeCode(), session.closeReason());
         }
         return true;
     }
@@ -130,14 +130,29 @@ public final class WebSocketSupport {
                 case WebSocketFrames.OPCODE_TEXT -> handler.onMessage(session, frame.text());
                 case WebSocketFrames.OPCODE_BINARY -> handler.onBinary(session, frame.payload());
                 case WebSocketFrames.OPCODE_PING -> {
-                    WebSocketFrames.write(out, WebSocketFrames.OPCODE_PONG, frame.payload(), false);
-                    out.flush();
+                    // Auto-reply with pong (RFC 6455 §5.5.2), then notify the app.
+                    synchronized (out) {
+                        WebSocketFrames.write(out, WebSocketFrames.OPCODE_PONG, frame.payload(), false);
+                        out.flush();
+                    }
+                    handler.onPing(session, frame.payload());
                 }
-                case WebSocketFrames.OPCODE_PONG -> {
-                    // ignore
-                }
+                case WebSocketFrames.OPCODE_PONG -> handler.onPong(session, frame.payload());
                 case WebSocketFrames.OPCODE_CLOSE -> {
-                    session.close(1000, "ack");
+                    int code = 1000;
+                    String reason = "";
+                    byte[] payload = frame.payload();
+                    if (payload.length >= 2) {
+                        code = ((payload[0] & 0xFF) << 8) | (payload[1] & 0xFF);
+                        if (payload.length > 2) {
+                            reason = new String(payload, 2, payload.length - 2, StandardCharsets.UTF_8);
+                        }
+                    }
+                    session.recordPeerClose(code, reason);
+                    // Echo a close frame back if still open (RFC 6455 §5.5.1).
+                    if (session.isOpen()) {
+                        session.close(code, reason.isEmpty() ? "ack" : reason);
+                    }
                     return;
                 }
                 default -> {
@@ -151,6 +166,6 @@ public final class WebSocketSupport {
     @Deprecated
     public static void unsupported() {
         throw new UnsupportedOperationException(
-                "Use Glint.websocket(path, handler) — WebSocket upgrade is implemented.");
+                "Use Glint.websocket(path, handler)  -  WebSocket upgrade is implemented.");
     }
 }

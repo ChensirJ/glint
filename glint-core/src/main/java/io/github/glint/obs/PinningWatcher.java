@@ -16,7 +16,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * with the in-flight Glint request via {@link Trace#forThread(long)}.
  *
  * <p>On JDK 21, blocking inside {@code synchronized} pins the virtual thread
- * to its carrier — this watcher surfaces that as a first-class diagnostic.
+ * to its carrier  -  this watcher surfaces that as a first-class diagnostic.
  */
 public final class PinningWatcher {
 

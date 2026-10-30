@@ -55,18 +55,14 @@ public final class GlintHttpServletResponse implements HttpServletResponse {
             glint.header("Content-Type", contentType);
         }
         for (Map.Entry<String, String> e : headers.entrySet()) {
+            if ("Set-Cookie".equalsIgnoreCase(e.getKey())) {
+                continue; // cookies go through HttpResponse.cookie(String)
+            }
             glint.header(e.getKey(), e.getValue());
         }
-        // First Set-Cookie via map; remaining via combined header if needed.
-        // HttpResponse is single-value per name — join with comma is wrong for cookies,
-        // so emit the first cookie as Set-Cookie and append others as Set-Cookie-N
-        // is also wrong. We concatenate using distinct keys only for the first;
-        // for multiple cookies we put them all in one header value separated by
-        // newlines is invalid. Practical approach: only first cookie as Set-Cookie
-        // (session), extras as additional "Set-Cookie" overwrite — last wins.
-        // Prefer writing the session cookie last so it sticks.
+        // Each cookie is a separate Set-Cookie header line (RFC 6265 / HTTP/1.1).
         for (String c : setCookies) {
-            glint.header("Set-Cookie", c);
+            glint.cookie(c);
         }
         glint.bytes(buffer.toByteArray(), contentType);
     }
@@ -116,6 +112,9 @@ public final class GlintHttpServletResponse implements HttpServletResponse {
     @Override public int getStatus() { return status; }
     @Override public String getHeader(String name) { return headers.get(name); }
     @Override public Collection<String> getHeaders(String name) {
+        if (name != null && "Set-Cookie".equalsIgnoreCase(name)) {
+            return Collections.unmodifiableList(setCookies);
+        }
         String v = headers.get(name);
         return v == null ? Collections.emptyList() : Collections.singletonList(v);
     }

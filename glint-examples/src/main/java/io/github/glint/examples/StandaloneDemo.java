@@ -5,7 +5,7 @@ import io.github.glint.middleware.Middlewares;
 import io.github.glint.obs.Trace;
 
 /**
- * Standalone Glint demo — no Spring required.
+ * Standalone Glint demo  -  no Spring required.
  *
  * <pre>{@code
  * mvn -pl glint-examples -am exec:java
