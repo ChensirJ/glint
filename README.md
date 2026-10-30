@@ -87,10 +87,12 @@ Bundled entry point with a real `main`: `io.github.glint.examples.StandaloneDemo
 
 ## Quick start - Spring Boot 3.2+ (replace Tomcat)
 
-`glint-spring-boot-starter` brings its own `ServletWebServerFactory` and already excludes
-`spring-boot-starter-tomcat`. Point `spring-boot-starter-web` at Glint the same way:
+`glint-spring-boot-starter` publishes a `ServletWebServerFactory` ahead of Tomcat
+auto-configuration and already excludes `spring-boot-starter-tomcat`. Point
+`spring-boot-starter-web` at Glint the same way. Full details:
+[`docs/spring-boot.md`](docs/spring-boot.md).
 
-**Maven** (`pom.xml`):
+**Maven** (`pom.xml`) - groupId **`io.github.chensirj`** (Java packages stay `io.github.glint.*`):
 
 ```xml
 <dependencies>
@@ -118,14 +120,15 @@ Until the starter is on Maven Central, install this repo locally first:
 mvn -q clean install -DskipTests
 ```
 
-(`groupId` `io.github.chensirj` is the published coordinate; the in-tree parent POM may still
-use a transitional id until Central publish is finished - prefer `io.github.chensirj` in apps.)
-
-**`application.yml`** (optional - defaults are fine):
+**`application.yml`** (matches the starter; defaults are fine):
 
 ```yaml
 server:
   port: 8080
+
+glint:
+  diagnostics: true   # /_vt dashboard (default true); virtual threads are always on
+
 spring:
   servlet:
     multipart:
@@ -133,7 +136,14 @@ spring:
       max-request-size: 10MB
 ```
 
-**Full application** (copy-paste `main`):
+| Property | Default | Notes |
+|----------|---------|-------|
+| `server.port` | `8080` | Standard Boot listen port. |
+| `glint.diagnostics` | `true` | Mount `/_vt`. |
+| Virtual threads | always on | Not a property; every connection uses a VT. |
+| Static / access log / CORS / rate limit | - | Standalone Glint middleware APIs; not Boot properties yet (use Spring CORS for MVC). |
+
+**Full application** (same shape as bundled `SpringBootDemo`):
 
 ```java
 package com.example.demo;
@@ -181,10 +191,10 @@ Bundled twin of this example: `io.github.glint.examples.SpringBootDemo`
 # or: mvn -pl glint-examples -am -Pspring-demo spring-boot:run
 ```
 
-Auto-configuration class: `io.github.glint.spring.GlintServerAutoConfiguration`
-(registered via `META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports`).
-Sessions, cookies, multipart uploads, and Spring MVC mapping work through the
-`glint-servlet` adapter. Diagnostics stay at `/_vt/` by default.
+Auto-configuration: `io.github.glint.spring.GlintServerAutoConfiguration` binds
+`GlintProperties` (`glint.*`) and registers `GlintServletWebServerFactory` via
+`META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports`.
+Sessions, cookies, multipart, and Spring MVC mapping go through `glint-servlet`.
 
 ## HTTP features (0.1+)
 

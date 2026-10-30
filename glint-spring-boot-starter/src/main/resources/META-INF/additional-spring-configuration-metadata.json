@@ -1,0 +1,18 @@
+{
+  "groups": [
+    {
+      "name": "glint",
+      "type": "io.github.glint.spring.GlintProperties",
+      "description": "Glint Spring Boot starter settings."
+    }
+  ],
+  "properties": [
+    {
+      "name": "glint.diagnostics",
+      "type": "java.lang.Boolean",
+      "description": "Mount the /_vt diagnostics dashboard and related JSON APIs. Virtual threads are always enabled for accepted connections.",
+      "defaultValue": true
+    }
+  ],
+  "hints": []
+}
