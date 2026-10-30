@@ -172,7 +172,7 @@
       const zc = st.zeroCopySends != null ? st.zeroCopySends : 0;
       document.getElementById("stHits").textContent = hits;
       document.getElementById("stSub").textContent =
-        hits + " hits / " + misses + " misses 路 zc " + zc;
+        hits + " hits / " + misses + " misses, zero-copy " + zc;
 
       const tbody = document.querySelector("#latencyTable tbody");
       tbody.innerHTML = "";
