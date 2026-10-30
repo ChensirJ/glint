@@ -41,6 +41,7 @@
     <module>glint-servlet</module>
     <module>glint-spring-boot-starter</module>
     <module>glint-examples</module>
+    <module>glint-bench</module>
   </modules>
 
   <properties>

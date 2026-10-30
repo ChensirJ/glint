@@ -3,6 +3,8 @@ package io.github.glint.http;
 import io.github.glint.obs.Trace;
 import io.github.glint.router.RouteHandler;
 
+import javax.net.ssl.SSLServerSocket;
+import javax.net.ssl.SSLServerSocketFactory;
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.IOException;
@@ -11,6 +13,8 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketException;
 import java.net.SocketTimeoutException;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -25,8 +29,12 @@ import java.util.concurrent.atomic.AtomicInteger;
  * <p>Hot paths intentionally avoid {@code synchronized} so virtual threads
  * are not pinned to carrier threads on JDK 21.
  *
- * <p>{@link #close()} stops accepting, then waits for in-flight requests to
- * drain up to {@link ServerConfig#shutdownWaitMs()}.
+ * <p>{@link #close()} stops accepting, force-closes idle keep-alive sockets
+ * (so shutdown does not wait for {@link ServerConfig#idleTimeoutMs()}), then
+ * drains in-flight requests up to {@link ServerConfig#shutdownWaitMs()}.
+ *
+ * <p>When {@link ServerConfig#sslContext()} is set, an {@link SSLServerSocket}
+ * is used (HTTPS). WebSocket / HTTP Upgrade is not implemented yet 鈥?see README.
  */
 public final class VtServer implements AutoCloseable {
 
@@ -36,6 +44,8 @@ public final class VtServer implements AutoCloseable {
     private final ServerConfig config;
     private final AtomicBoolean running = new AtomicBoolean(true);
     private final AtomicInteger inFlight = new AtomicInteger(0);
+    /** Open client sockets 鈥?closed on shutdown to unblock keep-alive readers. */
+    private final Set<Socket> openSockets = ConcurrentHashMap.newKeySet();
     private Thread acceptor;
 
     public VtServer(int port, RouteHandler handler) throws IOException {
@@ -45,9 +55,23 @@ public final class VtServer implements AutoCloseable {
     public VtServer(int port, RouteHandler handler, ServerConfig config) throws IOException {
         this.handler = handler;
         this.config = config == null ? ServerConfig.defaults() : config;
-        this.serverSocket = new ServerSocket();
-        this.serverSocket.setReuseAddress(true);
-        this.serverSocket.bind(new InetSocketAddress(port), this.config.backlog());
+        this.serverSocket = createServerSocket(port, this.config);
+    }
+
+    private static ServerSocket createServerSocket(int port, ServerConfig config) throws IOException {
+        ServerSocket ss;
+        if (config.sslContext() != null) {
+            SSLServerSocketFactory factory = config.sslContext().getServerSocketFactory();
+            SSLServerSocket ssl = (SSLServerSocket) factory.createServerSocket();
+            ssl.setReuseAddress(true);
+            ssl.bind(new InetSocketAddress(port), config.backlog());
+            ss = ssl;
+        } else {
+            ss = new ServerSocket();
+            ss.setReuseAddress(true);
+            ss.bind(new InetSocketAddress(port), config.backlog());
+        }
+        return ss;
     }
 
     public void start() {
@@ -55,6 +79,7 @@ public final class VtServer implements AutoCloseable {
             while (running.get()) {
                 try {
                     Socket socket = serverSocket.accept();
+                    openSockets.add(socket);
                     virtualThreads.submit(() -> serve(socket));
                 } catch (SocketException se) {
                     if (running.get()) {
@@ -125,13 +150,14 @@ public final class VtServer implements AutoCloseable {
         } catch (SocketTimeoutException ignored) {
             // idle timeout between requests
         } catch (IOException ignored) {
-            // Client closed or reset — normal for keep-alive.
+            // Client closed, reset, or server forced close during shutdown.
+        } finally {
+            openSockets.remove(socket);
         }
     }
 
     private static void writeError(HttpResponse resp, int status, String message) {
         String safe = message == null ? HttpResponse.reason(status) : message;
-        // Escape for JSON
         StringBuilder esc = new StringBuilder();
         for (int i = 0; i < safe.length(); i++) {
             char c = safe.charAt(i);
@@ -169,19 +195,37 @@ public final class VtServer implements AutoCloseable {
         } catch (IOException ignored) {
             // continue drain
         }
-        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(config.shutdownWaitMs());
+        // Force-close keep-alive sockets so virtual threads unblock immediately
+        // instead of waiting for idle SoTimeout (was ~30s in integration tests).
+        for (Socket s : openSockets) {
+            try {
+                s.close();
+            } catch (IOException ignored) {
+                // best effort
+            }
+        }
+        openSockets.clear();
+
+        // Cap drain wait: sockets are already closed; in-flight should finish quickly.
+        long waitMs = Math.min(config.shutdownWaitMs(), 2_000L);
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(waitMs);
         while (inFlight.get() > 0 && System.nanoTime() < deadline) {
             try {
-                Thread.sleep(25);
+                Thread.sleep(10);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 break;
             }
         }
-        virtualThreads.close();
+        virtualThreads.shutdownNow();
+        try {
+            virtualThreads.awaitTermination(1, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
         if (acceptor != null) {
             try {
-                acceptor.join(5_000);
+                acceptor.join(1_000);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }

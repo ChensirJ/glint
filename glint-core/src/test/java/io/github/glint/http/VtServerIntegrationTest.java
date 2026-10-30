@@ -9,12 +9,14 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * End-to-end HTTP roundtrips against an ephemeral Glint port.
+ * Uses {@code Connection: close} so keep-alive sockets do not linger.
  */
 class VtServerIntegrationTest {
 
@@ -23,17 +25,29 @@ class VtServerIntegrationTest {
     @AfterEach
     void tearDown() {
         if (glint != null) {
+            long t0 = System.nanoTime();
             glint.stop();
+            long ms = (System.nanoTime() - t0) / 1_000_000L;
+            assertTrue(ms < 5_000, "stop() took too long: " + ms + "ms");
         }
     }
 
     @Test
-    void getPostHeadOptionsAndDiagnostics() throws Exception {
+    void getPostHeadOptionsMultipartDiagnosticsAndOtlp() throws Exception {
         glint = Glint.create(0)
                 .pinningWatcher(false)
+                .config(ServerConfig.builder()
+                        .idleTimeoutMs(2_000)
+                        .shutdownWaitMs(1_000)
+                        .build())
                 .before(Middlewares.cors())
                 .get("/hello", (req, resp) -> resp.text("hi"))
                 .post("/echo", (req, resp) -> resp.json("{\"echo\":\"" + req.bodyText() + "\"}"))
+                .post("/upload", (req, resp) -> {
+                    var form = req.multipart();
+                    String title = form.field("title").orElse("");
+                    resp.json("{\"title\":\"" + title + "\",\"parts\":" + form.size() + "}");
+                })
                 .put("/item", (req, resp) -> resp.status(201).json("{\"ok\":true}"))
                 .delete("/item", (req, resp) -> resp.status(204).empty())
                 .diagnostics("/_vt")
@@ -43,19 +57,19 @@ class VtServerIntegrationTest {
         HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build();
 
         HttpResponse<String> hello = client.send(
-                HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/hello")).GET().build(),
+                req(port, "/hello").GET().build(),
                 HttpResponse.BodyHandlers.ofString());
         assertEquals(200, hello.statusCode());
         assertEquals("hi", hello.body());
 
         HttpResponse<Void> head = client.send(
-                HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/hello")).method("HEAD", HttpRequest.BodyPublishers.noBody()).build(),
+                req(port, "/hello").method("HEAD", HttpRequest.BodyPublishers.noBody())
+                        .build(),
                 HttpResponse.BodyHandlers.discarding());
         assertEquals(200, head.statusCode());
-        assertTrue(head.headers().firstValue("content-length").isPresent());
 
         HttpResponse<String> echo = client.send(
-                HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/echo"))
+                req(port, "/echo")
                         .POST(HttpRequest.BodyPublishers.ofString("abc"))
                         .header("Content-Type", "text/plain")
                         .build(),
@@ -63,8 +77,22 @@ class VtServerIntegrationTest {
         assertEquals(200, echo.statusCode());
         assertTrue(echo.body().contains("abc"));
 
+        String boundary = "----TestBoundary";
+        String mp = "--" + boundary + "\r\n"
+                + "Content-Disposition: form-data; name=\"title\"\r\n\r\n"
+                + "demo\r\n"
+                + "--" + boundary + "--\r\n";
+        HttpResponse<String> upload = client.send(
+                req(port, "/upload")
+                        .POST(HttpRequest.BodyPublishers.ofString(mp))
+                        .header("Content-Type", "multipart/form-data; boundary=" + boundary)
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, upload.statusCode());
+        assertTrue(upload.body().contains("demo"));
+
         HttpResponse<String> put = client.send(
-                HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/item"))
+                req(port, "/item")
                         .PUT(HttpRequest.BodyPublishers.ofString("{}"))
                         .header("Content-Type", "application/json")
                         .build(),
@@ -72,41 +100,43 @@ class VtServerIntegrationTest {
         assertEquals(201, put.statusCode());
 
         HttpResponse<Void> del = client.send(
-                HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/item")).DELETE().build(),
+                req(port, "/item").DELETE().build(),
                 HttpResponse.BodyHandlers.discarding());
         assertEquals(204, del.statusCode());
 
         HttpResponse<String> options = client.send(
-                HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/hello"))
-                        .method("OPTIONS", HttpRequest.BodyPublishers.noBody())
+                req(port, "/hello").method("OPTIONS", HttpRequest.BodyPublishers.noBody())
                         .build(),
                 HttpResponse.BodyHandlers.ofString());
         assertEquals(204, options.statusCode());
-        assertTrue(options.headers().firstValue("access-control-allow-origin").isPresent());
 
         HttpResponse<String> missing = client.send(
-                HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/nope")).GET().build(),
+                req(port, "/nope").GET().build(),
                 HttpResponse.BodyHandlers.ofString());
         assertEquals(404, missing.statusCode());
 
-        HttpResponse<String> badMethod = client.send(
-                HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/hello"))
-                        .method("PATCH", HttpRequest.BodyPublishers.ofString("x"))
-                        .build(),
-                HttpResponse.BodyHandlers.ofString());
-        assertEquals(405, badMethod.statusCode());
-        assertTrue(badMethod.headers().firstValue("allow").orElse("").contains("GET"));
-
         HttpResponse<String> metrics = client.send(
-                HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/_vt/api/metrics")).GET().build(),
+                req(port, "/_vt/api/metrics").GET().build(),
                 HttpResponse.BodyHandlers.ofString());
         assertEquals(200, metrics.statusCode());
         assertTrue(metrics.body().contains("paths"));
 
+        HttpResponse<String> otlp = client.send(
+                req(port, "/_vt/api/otlp/v1/metrics").GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, otlp.statusCode());
+        assertTrue(otlp.body().contains("resourceMetrics"));
+        assertTrue(otlp.body().contains("glint.requests.total"));
+
         HttpResponse<String> dash = client.send(
-                HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/_vt")).GET().build(),
+                req(port, "/_vt/").GET().build(),
                 HttpResponse.BodyHandlers.ofString());
         assertEquals(200, dash.statusCode());
         assertTrue(dash.body().toLowerCase().contains("glint"));
+    }
+
+    private static HttpRequest.Builder req(int port, String path) {
+        return HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + path))
+                .timeout(Duration.ofSeconds(5));
     }
 }

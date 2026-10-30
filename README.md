@@ -1,5 +1,9 @@
 # Glint
 
+<p align="center">
+  <img src="docs/images/logo.png" alt="Glint logo" width="128"/>
+</p>
+
 [![Java](https://img.shields.io/badge/Java-21%2B-orange)](https://openjdk.org/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Maven](https://img.shields.io/badge/Maven-multi--module-brightgreen)](pom.xml)
@@ -10,8 +14,23 @@
 Glint is a JDK 21+ HTTP server that runs every connection on a **virtual thread**, ships a live **`/_vt` diagnostics dashboard**, and can replace **Tomcat** in Spring Boot 3.2+ with a single starter dependency.
 
 <p align="center">
+  <!-- Real screenshot captured from a running /_vt via Playwright + Chrome -->
   <img src="docs/images/diagnostics-overview.png" alt="Glint diagnostics overview" width="820"/>
 </p>
+
+## Feature gallery demo
+
+A separate living demo lives next to this repo at **`D:\glint-demo`** (sibling folder; not published as part of this git tree).
+
+**Convention:** whenever Glint gains a capability, `glint-demo` is updated in the **same turn** so `/features` stays an accurate gallery of what the server can do.
+
+```bash
+# from Glint root — install artifacts into local .m2
+mvn -q clean install -DskipTests
+# then
+cd ..\glint-demo
+.\scripts\run.ps1
+```
 
 ## Why Glint?
 
@@ -22,146 +41,114 @@ Glint is a JDK 21+ HTTP server that runs every connection on a **virtual thread*
 | JDK 21 pinning is silent | JFR `jdk.VirtualThreadPinned` watcher with truncated stacks in `/_vt` |
 | Tomcat swap is heavy | Spring Boot starter implements `WebServer` / `ServletWebServerFactory` |
 
-<p align="center">
-  <img src="docs/images/pinning-alert.png" alt="Glint pinning alert panel" width="820"/>
-</p>
-
-## Architecture
-
-```mermaid
-flowchart LR
-  Client -->|HTTP/1.1| Acceptor[Platform acceptor thread]
-  Acceptor -->|accept| VTPool[Virtual thread per connection]
-  VTPool --> Router
-  Router --> Middleware
-  Middleware --> Handler[Route / DispatcherServlet]
-  Handler --> Trace[Trace + Metrics]
-  Trace --> Dashboard["/_vt dashboard"]
-  JFR[JFR PinningWatcher] -.correlate.-> Trace
-```
-
 ## Modules
 
 | Module | Description |
 |--------|-------------|
-| `glint-core` | HTTP parser (Content-Length + chunked), VT server, router, middleware, Trace, Metrics, PinningWatcher (**zero** third-party deps) |
-| `glint-dashboard` | Modern dark `/_vt` UI (self-contained CSS/JS, inline SVG) |
-| `glint-servlet` | Jakarta Servlet 6 adapter (enough for Spring MVC Hello World) |
+| `glint-core` | HTTP parser (Content-Length + chunked + **multipart**), VT server, router, middleware, Trace, Metrics, PinningWatcher, OTLP JSON export hooks (**zero** third-party deps) |
+| `glint-dashboard` | Modern dark `/_vt` UI |
+| `glint-servlet` | Jakarta Servlet 6 adapter (Hello World level) |
 | `glint-spring-boot-starter` | Drop-in Tomcat replacement |
 | `glint-examples` | Standalone + Spring Boot demos |
+| `glint-bench` | Throughput / latency microbench harness |
 
 ## Quick start — standalone
 
 ```java
 import io.github.glint.Glint;
 import io.github.glint.middleware.Middlewares;
-import io.github.glint.obs.Trace;
 
-public class App {
-    public static void main(String[] args) throws Exception {
-        Glint.create(8080)
-            .before(Middlewares.requestLogging())
-            .before(Middlewares.cors())
-            .get("/hello", (req, resp) -> resp.text("Hello, virtual threads!"))
-            .get("/users/{id}", (req, resp) -> {
-                String json = Trace.span("db.findUser", () ->
-                    "{\"id\":\"" + req.pathParam("id") + "\"}");
-                resp.json(json);
-            })
-            .diagnostics("/_vt")
-            .start();
-    }
-}
+Glint.create(8080)
+    .before(Middlewares.requestLogging())
+    .before(Middlewares.cors())
+    .get("/hello", (req, resp) -> resp.text("Hello, virtual threads!"))
+    .diagnostics("/_vt")
+    .start();
 ```
 
 ```bash
-# Windows
 .\scripts\run-standalone.ps1
-
-# macOS / Linux
-chmod +x scripts/run-standalone.sh && ./scripts/run-standalone.sh
-
-# or plain Maven (exec plugin is configured on glint-examples)
-mvn -pl glint-examples -am exec:java -Dexec.mainClass=io.github.glint.examples.StandaloneDemo
+# Open http://127.0.0.1:8080/_vt
 ```
-
-Open http://127.0.0.1:8080/_vt
-
-## Quick start — Spring Boot 3.2+
-
-**Exclude Tomcat** and add the Glint starter:
-
-```xml
-<dependency>
-  <groupId>org.springframework.boot</groupId>
-  <artifactId>spring-boot-starter-web</artifactId>
-  <exclusions>
-    <exclusion>
-      <groupId>org.springframework.boot</groupId>
-      <artifactId>spring-boot-starter-tomcat</artifactId>
-    </exclusion>
-  </exclusions>
-</dependency>
-<dependency>
-  <groupId>io.github.glint</groupId>
-  <artifactId>glint-spring-boot-starter</artifactId>
-  <version>0.1.0-SNAPSHOT</version>
-</dependency>
-```
-
-```bash
-# Windows
-.\scripts\run-spring.ps1
-
-# Maven profile enables spring-boot repackage / run
-mvn -pl glint-examples -am -Pspring-demo spring-boot:run
-```
-
-Demo listens on **8081** (`application.properties`). Open http://127.0.0.1:8081/hello and http://127.0.0.1:8081/_vt
 
 ## HTTP features (0.1+)
 
-- Methods: GET, HEAD (falls back to GET), POST, PUT, DELETE, PATCH, OPTIONS
-- Query string decoding, path params `{id}`
-- Request bodies: `Content-Length` and **chunked** transfer encoding
-- Limits: max body / header line, idle keep-alive timeout, graceful drain on shutdown
-- Responses: charset-aware text/json/html, proper 400 / 404 / 405 / 413 / 500 JSON errors
-- Middleware helpers: CORS, request logging, exception → JSON
+- Methods: GET, HEAD, POST, PUT, DELETE, PATCH, OPTIONS
+- Query string, path params `{id}`
+- Bodies: `Content-Length`, **chunked**, **`multipart/form-data`** (size-limited)
+- Limits / idle timeout / **fast graceful shutdown** (force-closes keep-alive sockets)
+- Optional **TLS** via `ServerConfig.builder().sslContext(SSLContext)`
+- Diagnostics: `/_vt`, metrics, slow, pinning, **`/_vt/api/otlp/v1/metrics`** (OTLP/HTTP JSON, no SDK dep)
+- ObsExporter SPI (`ServiceLoader`) for custom exporters
+- Middleware: CORS, request logging, exception → JSON
+- WebSocket / HTTP Upgrade: **not yet** (see `WebSocketSupport` stub)
+
+## Benchmarks
+
+Reproducible microbench (local machine only — re-run before quoting numbers):
+
+```bash
+# Windows
+.\scripts\run-bench.ps1
+# or
+mvn -pl glint-bench -am exec:java -Dexec.args="2 5 64"
+```
+
+Example output shape (fill in after you run on your box):
+
+```
+Glint microbench port=... warmup=2s duration=5s concurrency=64
+--- Glint results ---
+requests=...  errors=0
+throughput=... req/s
+latency p50=... ms  p99=... ms  max=... ms
+```
+
+**Tomcat comparison (manual):** start a minimal Spring Boot Tomcat app on another port with the same `/hello` body, then point a copy of the client loop in `Microbench` at that URL (or use `wrk`/`oha` against both). Keep concurrency and payload identical. Do not claim superiority without pasting both summaries.
+
+## OpenTelemetry
+
+- Zero required deps in `glint-core`.
+- Pull metrics as OTLP/HTTP JSON: `GET /_vt/api/otlp/v1/metrics`.
+- Push via SPI: implement `io.github.glint.obs.ObsExporter` and register in `META-INF/services/`.
 
 ## JDK 21 notes
 
-- Uses **`ThreadLocal`** for request context (not preview `ScopedValue`).
-- Hot paths avoid **`synchronized`** — prefer `ReentrantLock` / concurrent collections.
+- `ThreadLocal` for request context (not preview `ScopedValue`).
+- Hot paths avoid `synchronized` — prefer `ReentrantLock` / concurrent collections.
 - `PinningWatcher` listens for `jdk.VirtualThreadPinned` via `RecordingStream`.
 
 ## Build & test
 
 ```bash
 mvn -q verify
+mvn -q install   # needed before running ../glint-demo
 ```
 
 Requires **JDK 21+** and **Maven 3.9+**.
 
 ## Roadmap
 
-- [x] Virtual-thread HTTP/1.1 core + keep-alive
-- [x] Chunked request body decode, query params, HEAD/PUT/DELETE/OPTIONS
-- [x] Path params, middleware, diagnostics JSON + modern `/_vt` dashboard
-- [x] Slow-request + pinning event rings for the UI
+- [x] Virtual-thread HTTP/1.1 core + keep-alive + fast shutdown
+- [x] Chunked + multipart bodies, query params, HEAD/PUT/DELETE/OPTIONS
+- [x] Path params, middleware, diagnostics JSON + `/_vt` dashboard
+- [x] OTLP/HTTP JSON metrics endpoint + ObsExporter SPI
+- [x] Optional TLS via SSLContext
+- [x] Microbench module (`glint-bench`)
 - [x] Servlet adapter + Spring Boot starter (Hello World)
-- [ ] OpenTelemetry OTLP exporter (hooks via Metrics.snapshot today)
-- [ ] Multipart upload
-- [ ] Broader Servlet 6 coverage (session, async, WebSocket)
-- [ ] Published JMH vs Tomcat / Undertow / Jetty
+- [ ] Full OTLP trace export / SDK bridge module
+- [ ] Broader Servlet 6 (session, async)
+- [ ] WebSocket upgrade (see `WebSocketSupport`)
+- [ ] Published JMH vs Tomcat / Undertow / Jetty with CI numbers
 - [ ] GraalVM native-image recipe for standalone mode
 
 ## Out of scope (0.1)
 
-Full Servlet 6, HTTP/2/3, TLS termination, DI/ORM frameworks.
+Full Servlet 6, HTTP/2/3, WebSocket frames, DI/ORM frameworks.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Issues tagged `good first issue` are a great place to start.
+See [CONTRIBUTING.md](CONTRIBUTING.md). Keep **`glint-demo`** (`D:\glint-demo`) in sync when adding user-visible features.
 
 ## License
 

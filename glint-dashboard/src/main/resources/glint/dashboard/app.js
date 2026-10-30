@@ -1,5 +1,5 @@
 (function () {
-  const base = document.location.pathname.replace(/\/?$/, "");
+  const base = document.location.pathname.replace(/\/index\.html$/, "").replace(/\/?$/, "");
 
   async function jget(path) {
     const r = await fetch(base + path, { cache: "no-store" });

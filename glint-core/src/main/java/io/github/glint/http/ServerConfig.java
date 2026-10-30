@@ -1,10 +1,13 @@
 package io.github.glint.http;
 
+import javax.net.ssl.SSLContext;
+
 /**
  * Tunables for {@link VtServer}. All fields have safe defaults for demos;
  * raise limits carefully in production.
  *
  * <p>Hot paths avoid {@code synchronized}; this config is immutable after build.
+ * Optional {@link SSLContext} enables HTTPS via an SSLServerSocket.
  */
 public final class ServerConfig {
 
@@ -13,12 +16,17 @@ public final class ServerConfig {
     public static final int DEFAULT_IDLE_TIMEOUT_MS = 30_000;
     public static final int DEFAULT_BACKLOG = 4096;
     public static final long DEFAULT_SHUTDOWN_WAIT_MS = 10_000L;
+    public static final int DEFAULT_MAX_MULTIPART_PARTS = 64;
+    public static final int DEFAULT_MAX_MULTIPART_PART_BYTES = 1 * 1024 * 1024; // 1 MiB
 
     private final int maxRequestBodyBytes;
     private final int maxHeaderLineBytes;
     private final int idleTimeoutMs;
     private final int backlog;
     private final long shutdownWaitMs;
+    private final int maxMultipartParts;
+    private final int maxMultipartPartBytes;
+    private final SSLContext sslContext;
 
     private ServerConfig(Builder b) {
         this.maxRequestBodyBytes = b.maxRequestBodyBytes;
@@ -26,6 +34,9 @@ public final class ServerConfig {
         this.idleTimeoutMs = b.idleTimeoutMs;
         this.backlog = b.backlog;
         this.shutdownWaitMs = b.shutdownWaitMs;
+        this.maxMultipartParts = b.maxMultipartParts;
+        this.maxMultipartPartBytes = b.maxMultipartPartBytes;
+        this.sslContext = b.sslContext;
     }
 
     public static ServerConfig defaults() {
@@ -56,12 +67,32 @@ public final class ServerConfig {
         return shutdownWaitMs;
     }
 
+    public int maxMultipartParts() {
+        return maxMultipartParts;
+    }
+
+    public int maxMultipartPartBytes() {
+        return maxMultipartPartBytes;
+    }
+
+    /** When non-null, {@link VtServer} binds an SSL server socket (HTTPS). */
+    public SSLContext sslContext() {
+        return sslContext;
+    }
+
+    public boolean sslEnabled() {
+        return sslContext != null;
+    }
+
     public static final class Builder {
         private int maxRequestBodyBytes = DEFAULT_MAX_REQUEST_BODY;
         private int maxHeaderLineBytes = DEFAULT_MAX_HEADER_LINE;
         private int idleTimeoutMs = DEFAULT_IDLE_TIMEOUT_MS;
         private int backlog = DEFAULT_BACKLOG;
         private long shutdownWaitMs = DEFAULT_SHUTDOWN_WAIT_MS;
+        private int maxMultipartParts = DEFAULT_MAX_MULTIPART_PARTS;
+        private int maxMultipartPartBytes = DEFAULT_MAX_MULTIPART_PART_BYTES;
+        private SSLContext sslContext;
 
         public Builder maxRequestBodyBytes(int v) {
             this.maxRequestBodyBytes = v;
@@ -88,12 +119,37 @@ public final class ServerConfig {
             return this;
         }
 
+        public Builder maxMultipartParts(int v) {
+            this.maxMultipartParts = v;
+            return this;
+        }
+
+        public Builder maxMultipartPartBytes(int v) {
+            this.maxMultipartPartBytes = v;
+            return this;
+        }
+
+        /**
+         * Optional TLS. Pass a configured {@link SSLContext} (for example from
+         * a keystore) to serve HTTPS. Null keeps plain HTTP.
+         */
+        public Builder sslContext(SSLContext ctx) {
+            this.sslContext = ctx;
+            return this;
+        }
+
         public ServerConfig build() {
             if (maxRequestBodyBytes < 0) {
                 throw new IllegalArgumentException("maxRequestBodyBytes");
             }
             if (idleTimeoutMs < 0) {
                 throw new IllegalArgumentException("idleTimeoutMs");
+            }
+            if (maxMultipartParts < 1) {
+                throw new IllegalArgumentException("maxMultipartParts");
+            }
+            if (maxMultipartPartBytes < 0) {
+                throw new IllegalArgumentException("maxMultipartPartBytes");
             }
             return new ServerConfig(this);
         }

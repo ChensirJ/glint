@@ -18,6 +18,9 @@ import java.util.concurrent.atomic.AtomicInteger;
  * on stable JDK 21 APIs without {@code --enable-preview}.
  * Always {@link ThreadLocal#remove()} after the request so keep-alive
  * connections that reuse the same virtual thread do not leak context.
+ *
+ * <p>After each request, optional {@link ObsExporter} SPI implementations
+ * receive the metrics snapshot and request context.
  */
 public final class Trace {
 
@@ -69,6 +72,10 @@ public final class Trace {
             if (dur > 500_000_000L) {
                 SlowLog.dump(ctx, dur);
             }
+            ObsExporters.emitRequest(ctx, dur);
+            // Cheap snapshot fan-out for metric-only exporters (sampled every request;
+            // exporters should be non-blocking).
+            ObsExporters.emitMetrics(METRICS.snapshot());
         }
     }
 

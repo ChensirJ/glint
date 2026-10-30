@@ -7,6 +7,8 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
+import io.github.glint.http.multipart.MultipartForm;
+import io.github.glint.http.multipart.MultipartParser;
 import java.util.Optional;
 
 /**
@@ -141,7 +143,20 @@ public final class HttpRequest {
         return Collections.unmodifiableMap(pathParams);
     }
 
-    static Map<String, String> parseQuery(String raw) {
+    /**
+     * Parse {@code multipart/form-data} using {@link ServerConfig#defaults()}.
+     * Returns an empty form when Content-Type is not multipart.
+     */
+    public MultipartForm multipart() {
+        return MultipartParser.parse(this, ServerConfig.defaults());
+    }
+
+    /** Parse multipart with custom size limits. */
+    public MultipartForm multipart(ServerConfig config) {
+        return MultipartParser.parse(this, config);
+    }
+
+        static Map<String, String> parseQuery(String raw) {
         Map<String, String> map = new LinkedHashMap<>();
         if (raw == null || raw.isEmpty()) {
             return Collections.unmodifiableMap(map);
