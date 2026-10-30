@@ -10,7 +10,7 @@
   </parent>
   <artifactId>glint-servlet</artifactId>
   <name>Glint Servlet</name>
-  <description>Jakarta Servlet 6 adapter sufficient for Spring MVC Hello World.</description>
+  <description>Jakarta Servlet 6 adapter: sessions, multipart Parts, async, Spring MVC Hello World.</description>
   <dependencies>
     <dependency>
       <groupId>io.github.glint</groupId>
@@ -20,6 +20,11 @@
       <groupId>jakarta.servlet</groupId>
       <artifactId>jakarta.servlet-api</artifactId>
       <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <scope>test</scope>
     </dependency>
   </dependencies>
 </project>

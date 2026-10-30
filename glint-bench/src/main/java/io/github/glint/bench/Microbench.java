@@ -87,7 +87,6 @@ public final class Microbench {
             futures.add(pool.submit(() -> {
                 HttpRequest request = HttpRequest.newBuilder(URI.create(url))
                         .timeout(Duration.ofSeconds(5))
-                        .header("Connection", "keep-alive")
                         .GET()
                         .build();
                 while (System.nanoTime() < deadline) {

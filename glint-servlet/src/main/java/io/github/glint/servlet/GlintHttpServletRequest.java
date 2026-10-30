@@ -1,6 +1,8 @@
 package io.github.glint.servlet;
 
 import io.github.glint.http.HttpRequest;
+import io.github.glint.http.ServerConfig;
+import io.github.glint.http.multipart.MultipartForm;
 import jakarta.servlet.AsyncContext;
 import jakarta.servlet.DispatcherType;
 import jakarta.servlet.RequestDispatcher;
@@ -35,22 +37,58 @@ import java.util.Locale;
 import java.util.Map;
 
 /**
- * Minimal {@link HttpServletRequest} wrapping a Glint {@link HttpRequest}.
- * Enough for Spring {@code DispatcherServlet} Hello World controllers.
- * Full Servlet 6 compliance is intentionally out of scope for 0.1.
+ * {@link HttpServletRequest} wrapping a Glint {@link HttpRequest}.
+ *
+ * <p>Supports cookie sessions ({@code JSESSIONID}), multipart via
+ * {@link #getParts()}, and a virtual-thread {@link AsyncContext}.
  */
 public final class GlintHttpServletRequest implements HttpServletRequest {
 
     private final HttpRequest delegate;
     private final ServletContext servletContext;
+    private final GlintHttpServletResponse response;
     private final Map<String, Object> attributes = new HashMap<>();
     private String characterEncoding = StandardCharsets.UTF_8.name();
     private final Map<String, String[]> parameters;
+    private GlintHttpSession session;
+    private boolean sessionFromCookie;
+    private Collection<Part> cachedParts;
+    private GlintAsyncContext asyncContext;
+    private boolean asyncStarted;
 
-    public GlintHttpServletRequest(HttpRequest delegate, ServletContext servletContext) {
+    public GlintHttpServletRequest(HttpRequest delegate,
+                                   ServletContext servletContext,
+                                   GlintHttpServletResponse response) {
         this.delegate = delegate;
         this.servletContext = servletContext;
+        this.response = response;
         this.parameters = parseQuery(delegate.query());
+        String sid = readSessionIdFromCookie();
+        if (sid != null) {
+            GlintHttpSession existing = GlintSessionManager.get(sid);
+            if (existing != null) {
+                this.session = existing;
+                this.sessionFromCookie = true;
+            }
+        }
+    }
+
+    private String readSessionIdFromCookie() {
+        String raw = delegate.header("cookie").orElse(null);
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+        for (String part : raw.split(";")) {
+            String p = part.trim();
+            int eq = p.indexOf('=');
+            if (eq > 0) {
+                String name = p.substring(0, eq).trim();
+                if (GlintSessionManager.COOKIE_NAME.equals(name)) {
+                    return p.substring(eq + 1).trim();
+                }
+            }
+        }
+        return null;
     }
 
     private static Map<String, String[]> parseQuery(String query) {
@@ -73,7 +111,21 @@ public final class GlintHttpServletRequest implements HttpServletRequest {
     }
 
     @Override public String getAuthType() { return null; }
-    @Override public Cookie[] getCookies() { return new Cookie[0]; }
+    @Override public Cookie[] getCookies() {
+        String raw = delegate.header("cookie").orElse(null);
+        if (raw == null || raw.isBlank()) {
+            return new Cookie[0];
+        }
+        List<Cookie> list = new ArrayList<>();
+        for (String part : raw.split(";")) {
+            String p = part.trim();
+            int eq = p.indexOf('=');
+            if (eq > 0) {
+                list.add(new Cookie(p.substring(0, eq).trim(), p.substring(eq + 1).trim()));
+            }
+        }
+        return list.toArray(Cookie[]::new);
+    }
     @Override public long getDateHeader(String name) { return -1; }
     @Override public String getHeader(String name) { return delegate.header(name).orElse(null); }
     @Override public Enumeration<String> getHeaders(String name) {
@@ -97,23 +149,95 @@ public final class GlintHttpServletRequest implements HttpServletRequest {
     @Override public String getRemoteUser() { return null; }
     @Override public boolean isUserInRole(String role) { return false; }
     @Override public Principal getUserPrincipal() { return null; }
-    @Override public String getRequestedSessionId() { return null; }
+    @Override public String getRequestedSessionId() {
+        return session != null ? session.getId() : readSessionIdFromCookie();
+    }
     @Override public String getRequestURI() { return delegate.path(); }
     @Override public StringBuffer getRequestURL() {
         return new StringBuffer("http://localhost").append(delegate.path());
     }
     @Override public String getServletPath() { return delegate.path(); }
-    @Override public HttpSession getSession(boolean create) { return null; }
-    @Override public HttpSession getSession() { return null; }
-    @Override public String changeSessionId() { throw new IllegalStateException("sessions not supported"); }
-    @Override public boolean isRequestedSessionIdValid() { return false; }
-    @Override public boolean isRequestedSessionIdFromCookie() { return false; }
+
+    @Override
+    public HttpSession getSession(boolean create) {
+        if (session != null && !session.expired()) {
+            session.touch();
+            return session;
+        }
+        if (!create) {
+            return null;
+        }
+        session = GlintSessionManager.create(servletContext);
+        sessionFromCookie = false;
+        if (response != null) {
+            Cookie c = new Cookie(GlintSessionManager.COOKIE_NAME, session.getId());
+            c.setPath("/");
+            c.setHttpOnly(true);
+            response.addCookie(c);
+        }
+        return session;
+    }
+
+    @Override
+    public HttpSession getSession() {
+        return getSession(true);
+    }
+
+    @Override
+    public String changeSessionId() {
+        HttpSession old = getSession(false);
+        if (old == null) {
+            throw new IllegalStateException("no session");
+        }
+        old.invalidate();
+        session = null;
+        return getSession(true).getId();
+    }
+
+    @Override public boolean isRequestedSessionIdValid() {
+        return session != null && !session.expired();
+    }
+    @Override public boolean isRequestedSessionIdFromCookie() { return sessionFromCookie; }
     @Override public boolean isRequestedSessionIdFromURL() { return false; }
     @Override public boolean authenticate(HttpServletResponse response) { return false; }
-    @Override public void login(String username, String password) throws ServletException { throw new ServletException("unsupported"); }
+    @Override public void login(String username, String password) throws ServletException {
+        throw new ServletException("unsupported");
+    }
     @Override public void logout() { }
-    @Override public Collection<Part> getParts() { return List.of(); }
-    @Override public Part getPart(String name) { return null; }
+
+    @Override
+    public Collection<Part> getParts() throws IOException, ServletException {
+        if (cachedParts != null) {
+            return cachedParts;
+        }
+        String ct = getContentType();
+        if (ct == null || !ct.toLowerCase(Locale.ROOT).startsWith("multipart/")) {
+            cachedParts = List.of();
+            return cachedParts;
+        }
+        try {
+            MultipartForm form = delegate.multipart(ServerConfig.defaults());
+            List<Part> parts = new ArrayList<>();
+            for (io.github.glint.http.multipart.Part p : form.all()) {
+                parts.add(new GlintServletPart(p));
+            }
+            cachedParts = Collections.unmodifiableList(parts);
+            return cachedParts;
+        } catch (RuntimeException e) {
+            throw new ServletException("multipart parse failed", e);
+        }
+    }
+
+    @Override
+    public Part getPart(String name) throws IOException, ServletException {
+        for (Part p : getParts()) {
+            if (p.getName().equals(name)) {
+                return p;
+            }
+        }
+        return null;
+    }
+
     @Override public <T extends HttpUpgradeHandler> T upgrade(Class<T> handlerClass) {
         throw new UnsupportedOperationException("upgrade");
     }
@@ -180,13 +304,29 @@ public final class GlintHttpServletRequest implements HttpServletRequest {
     @Override public String getLocalAddr() { return "127.0.0.1"; }
     @Override public int getLocalPort() { return 80; }
     @Override public ServletContext getServletContext() { return servletContext; }
-    @Override public AsyncContext startAsync() { throw new UnsupportedOperationException("async"); }
-    @Override public AsyncContext startAsync(ServletRequest servletRequest, ServletResponse servletResponse) {
-        throw new UnsupportedOperationException("async");
+
+    @Override
+    public AsyncContext startAsync() {
+        return startAsync(this, response);
     }
-    @Override public boolean isAsyncStarted() { return false; }
-    @Override public boolean isAsyncSupported() { return false; }
-    @Override public AsyncContext getAsyncContext() { throw new IllegalStateException("async"); }
+
+    @Override
+    public AsyncContext startAsync(ServletRequest servletRequest, ServletResponse servletResponse) {
+        if (asyncContext == null) {
+            asyncContext = new GlintAsyncContext(servletRequest, servletResponse, response);
+        }
+        asyncStarted = true;
+        return asyncContext;
+    }
+
+    @Override public boolean isAsyncStarted() { return asyncStarted; }
+    @Override public boolean isAsyncSupported() { return true; }
+    @Override public AsyncContext getAsyncContext() {
+        if (asyncContext == null) {
+            throw new IllegalStateException("async not started");
+        }
+        return asyncContext;
+    }
     @Override public DispatcherType getDispatcherType() { return DispatcherType.REQUEST; }
     @Override public String getRequestId() { return ""; }
     @Override public String getProtocolRequestId() { return ""; }

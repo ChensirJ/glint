@@ -1,5 +1,6 @@
 package io.github.glint.http;
 
+import io.github.glint.http.websocket.WebSocketSupport;
 import io.github.glint.obs.Trace;
 import io.github.glint.router.RouteHandler;
 
@@ -29,12 +30,9 @@ import java.util.concurrent.atomic.AtomicInteger;
  * <p>Hot paths intentionally avoid {@code synchronized} so virtual threads
  * are not pinned to carrier threads on JDK 21.
  *
- * <p>{@link #close()} stops accepting, force-closes idle keep-alive sockets
- * (so shutdown does not wait for {@link ServerConfig#idleTimeoutMs()}), then
- * drains in-flight requests up to {@link ServerConfig#shutdownWaitMs()}.
- *
- * <p>When {@link ServerConfig#sslContext()} is set, an {@link SSLServerSocket}
- * is used (HTTPS). WebSocket / HTTP Upgrade is not implemented yet 鈥?see README.
+ * <p>When a registered WebSocket route matches an Upgrade request, the
+ * connection is handed to {@link WebSocketSupport} and leaves the HTTP
+ * keep-alive loop.
  */
 public final class VtServer implements AutoCloseable {
 
@@ -42,19 +40,25 @@ public final class VtServer implements AutoCloseable {
     private final ExecutorService virtualThreads = Executors.newVirtualThreadPerTaskExecutor();
     private final RouteHandler handler;
     private final ServerConfig config;
+    private final WebSocketSupport.Registry webSockets;
     private final AtomicBoolean running = new AtomicBoolean(true);
     private final AtomicInteger inFlight = new AtomicInteger(0);
-    /** Open client sockets 鈥?closed on shutdown to unblock keep-alive readers. */
     private final Set<Socket> openSockets = ConcurrentHashMap.newKeySet();
     private Thread acceptor;
 
     public VtServer(int port, RouteHandler handler) throws IOException {
-        this(port, handler, ServerConfig.defaults());
+        this(port, handler, ServerConfig.defaults(), null);
     }
 
     public VtServer(int port, RouteHandler handler, ServerConfig config) throws IOException {
+        this(port, handler, config, null);
+    }
+
+    public VtServer(int port, RouteHandler handler, ServerConfig config,
+                    WebSocketSupport.Registry webSockets) throws IOException {
         this.handler = handler;
         this.config = config == null ? ServerConfig.defaults() : config;
+        this.webSockets = webSockets;
         this.serverSocket = createServerSocket(port, this.config);
     }
 
@@ -112,11 +116,22 @@ public final class VtServer implements AutoCloseable {
                     err.finish();
                     return;
                 } catch (SocketTimeoutException timeout) {
-                    return; // idle keep-alive expired
+                    return;
                 }
                 if (req == null) {
                     return;
                 }
+
+                // WebSocket upgrade takes over the socket for the rest of its life.
+                try {
+                    if (WebSocketSupport.maybeUpgrade(webSockets, req, socket, in, out)) {
+                        return;
+                    }
+                } catch (Exception wsEx) {
+                    wsEx.printStackTrace();
+                    return;
+                }
+
                 HttpResponse resp = new HttpResponse(out);
                 if (req.method() == HttpMethod.HEAD) {
                     resp.suppressBody(true);
@@ -195,8 +210,6 @@ public final class VtServer implements AutoCloseable {
         } catch (IOException ignored) {
             // continue drain
         }
-        // Force-close keep-alive sockets so virtual threads unblock immediately
-        // instead of waiting for idle SoTimeout (was ~30s in integration tests).
         for (Socket s : openSockets) {
             try {
                 s.close();
@@ -206,7 +219,6 @@ public final class VtServer implements AutoCloseable {
         }
         openSockets.clear();
 
-        // Cap drain wait: sockets are already closed; in-flight should finish quickly.
         long waitMs = Math.min(config.shutdownWaitMs(), 2_000L);
         long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(waitMs);
         while (inFlight.get() > 0 && System.nanoTime() < deadline) {

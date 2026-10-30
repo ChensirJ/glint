@@ -10,11 +10,20 @@
   </parent>
   <artifactId>glint-bench</artifactId>
   <name>Glint Bench</name>
-  <description>Microbenchmark harness for Glint throughput / latency (no JMH required).</description>
+  <description>Microbenchmark harness: Glint alone and Glint vs embedded Tomcat.</description>
   <dependencies>
     <dependency>
       <groupId>io.github.glint</groupId>
       <artifactId>glint-core</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.tomcat.embed</groupId>
+      <artifactId>tomcat-embed-core</artifactId>
+      <version>10.1.24</version>
+    </dependency>
+    <dependency>
+      <groupId>jakarta.servlet</groupId>
+      <artifactId>jakarta.servlet-api</artifactId>
     </dependency>
   </dependencies>
   <build>
@@ -24,7 +33,7 @@
         <artifactId>exec-maven-plugin</artifactId>
         <version>3.3.0</version>
         <configuration>
-          <mainClass>io.github.glint.bench.Microbench</mainClass>
+          <mainClass>io.github.glint.bench.ComparisonBench</mainClass>
         </configuration>
       </plugin>
     </plugins>

@@ -2,10 +2,10 @@ package io.github.glint;
 
 import io.github.glint.diag.DiagnosticsHandler;
 import io.github.glint.http.HttpMethod;
-import io.github.glint.http.HttpRequest;
-import io.github.glint.http.HttpResponse;
 import io.github.glint.http.ServerConfig;
 import io.github.glint.http.VtServer;
+import io.github.glint.http.websocket.WebSocketHandler;
+import io.github.glint.http.websocket.WebSocketSupport;
 import io.github.glint.middleware.Middleware;
 import io.github.glint.obs.PinningWatcher;
 import io.github.glint.router.RouteHandler;
@@ -23,6 +23,7 @@ import java.util.stream.Collectors;
  * <pre>{@code
  * Glint.create(8080)
  *     .get("/hello", (req, resp) -> resp.text("Hello"))
+ *     .websocket("/ws/echo", (session, text) -> session.sendText(text))
  *     .diagnostics("/_vt")
  *     .start();
  * }</pre>
@@ -34,6 +35,7 @@ public final class Glint {
     private final int port;
     private final Router router = new Router();
     private final List<Middleware> before = new ArrayList<>();
+    private final WebSocketSupport.Registry webSockets = new WebSocketSupport.Registry();
     private String diagnosticsPath;
     private boolean pinningWatcher = true;
     private ServerConfig config = ServerConfig.defaults();
@@ -91,6 +93,15 @@ public final class Glint {
         return this;
     }
 
+    /**
+     * Register an HTTP/1.1 WebSocket endpoint. Matching Upgrade requests
+     * complete the handshake and pump frames on the connection's virtual thread.
+     */
+    public Glint websocket(String path, WebSocketHandler handler) {
+        webSockets.add(path, Objects.requireNonNull(handler, "handler"));
+        return this;
+    }
+
     /** Register a middleware that runs before the matched route handler. */
     public Glint before(Middleware middleware) {
         before.add(Objects.requireNonNull(middleware, "middleware"));
@@ -135,7 +146,7 @@ public final class Glint {
             DiagnosticsHandler.install(router, diagnosticsPath);
         }
         RouteHandler pipeline = buildPipeline();
-        server = new VtServer(port, pipeline, config);
+        server = new VtServer(port, pipeline, config, webSockets);
         if (pinningWatcher) {
             PinningWatcher.start();
         }

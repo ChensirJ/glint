@@ -11,6 +11,9 @@ import java.io.IOException;
 /**
  * Bridges Glint HTTP requests to a registered Jakarta {@link Servlet}
  * (typically Spring's {@code DispatcherServlet}).
+ *
+ * <p>When the servlet starts async processing, this dispatcher waits for
+ * {@link GlintAsyncContext#complete()} before returning to VtServer.
  */
 public final class GlintServletDispatcher implements RouteHandler {
 
@@ -27,13 +30,19 @@ public final class GlintServletDispatcher implements RouteHandler {
             response.status(404).text("No servlet registered for " + request.path());
             return;
         }
-        GlintHttpServletRequest req = new GlintHttpServletRequest(request, context);
         GlintHttpServletResponse resp = new GlintHttpServletResponse(response);
+        GlintHttpServletRequest req = new GlintHttpServletRequest(request, context, resp);
         try {
             servlet.service(req, resp);
-            resp.commitToGlint();
+            if (req.isAsyncStarted()) {
+                ((GlintAsyncContext) req.getAsyncContext()).awaitCompletion();
+            } else {
+                resp.commitToGlint();
+            }
         } catch (ServletException | IOException e) {
-            response.status(500).text("Servlet error: " + e.getMessage());
+            if (!response.committed()) {
+                response.status(500).text("Servlet error: " + e.getMessage());
+            }
             throw e;
         }
     }

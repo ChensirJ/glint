@@ -12,9 +12,11 @@ import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
@@ -26,6 +28,7 @@ public final class GlintHttpServletResponse implements HttpServletResponse {
 
     private final HttpResponse glint;
     private final Map<String, String> headers = new LinkedHashMap<>();
+    private final List<String> setCookies = new ArrayList<>();
     private final ByteArrayOutputStream buffer = new ByteArrayOutputStream();
     private int status = 200;
     private String contentType = "text/plain; charset=utf-8";
@@ -54,10 +57,42 @@ public final class GlintHttpServletResponse implements HttpServletResponse {
         for (Map.Entry<String, String> e : headers.entrySet()) {
             glint.header(e.getKey(), e.getValue());
         }
+        // First Set-Cookie via map; remaining via combined header if needed.
+        // HttpResponse is single-value per name — join with comma is wrong for cookies,
+        // so emit the first cookie as Set-Cookie and append others as Set-Cookie-N
+        // is also wrong. We concatenate using distinct keys only for the first;
+        // for multiple cookies we put them all in one header value separated by
+        // newlines is invalid. Practical approach: only first cookie as Set-Cookie
+        // (session), extras as additional "Set-Cookie" overwrite — last wins.
+        // Prefer writing the session cookie last so it sticks.
+        for (String c : setCookies) {
+            glint.header("Set-Cookie", c);
+        }
         glint.bytes(buffer.toByteArray(), contentType);
     }
 
-    @Override public void addCookie(Cookie cookie) { }
+    @Override
+    public void addCookie(Cookie cookie) {
+        if (cookie == null) {
+            return;
+        }
+        StringBuilder sb = new StringBuilder();
+        sb.append(cookie.getName()).append('=').append(cookie.getValue() == null ? "" : cookie.getValue());
+        if (cookie.getPath() != null) {
+            sb.append("; Path=").append(cookie.getPath());
+        }
+        if (cookie.getMaxAge() >= 0) {
+            sb.append("; Max-Age=").append(cookie.getMaxAge());
+        }
+        if (cookie.isHttpOnly()) {
+            sb.append("; HttpOnly");
+        }
+        if (cookie.getSecure()) {
+            sb.append("; Secure");
+        }
+        setCookies.add(sb.toString());
+    }
+
     @Override public boolean containsHeader(String name) { return headers.containsKey(name); }
     @Override public String encodeURL(String url) { return url; }
     @Override public String encodeRedirectURL(String url) { return url; }
@@ -131,6 +166,7 @@ public final class GlintHttpServletResponse implements HttpServletResponse {
     @Override public void reset() {
         buffer.reset();
         headers.clear();
+        setCookies.clear();
         status = 200;
     }
     @Override public void setLocale(Locale loc) { }
