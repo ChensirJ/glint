@@ -36,6 +36,7 @@ public final class StaticOptions {
     private final long immutableMaxAgeSeconds;
     private final String defaultCacheControl;
     private final long revalidateMillis;
+    private final boolean directoryListing;
 
     private StaticOptions(Builder b) {
         this.cacheMaxEntryBytes = b.cacheMaxEntryBytes;
@@ -46,6 +47,7 @@ public final class StaticOptions {
         this.immutableMaxAgeSeconds = b.immutableMaxAgeSeconds;
         this.defaultCacheControl = b.defaultCacheControl;
         this.revalidateMillis = b.revalidateMillis;
+        this.directoryListing = b.directoryListing;
     }
 
     public static StaticOptions defaults() {
@@ -89,6 +91,14 @@ public final class StaticOptions {
         return revalidateMillis;
     }
 
+    /**
+     * When true, directories without {@code index.html} return a simple HTML or JSON
+     * listing (off by default). Path traversal is still rejected.
+     */
+    public boolean directoryListing() {
+        return directoryListing;
+    }
+
     /** True when {@code fileName} should receive the long-lived immutable cache header. */
     public boolean isImmutable(String fileName) {
         if (immutableAll) {
@@ -111,6 +121,7 @@ public final class StaticOptions {
         private long immutableMaxAgeSeconds = DEFAULT_IMMUTABLE_MAX_AGE;
         private String defaultCacheControl;
         private long revalidateMillis = 1000L;
+        private boolean directoryListing;
 
         /** See {@link StaticOptions#revalidateMillis()}. */
         public Builder revalidateMillis(long v) {
@@ -164,6 +175,12 @@ public final class StaticOptions {
 
         public Builder defaultCacheControl(String v) {
             this.defaultCacheControl = v;
+            return this;
+        }
+
+        /** Enable a safe HTML/JSON directory listing when no index.html is present. */
+        public Builder directoryListing(boolean enabled) {
+            this.directoryListing = enabled;
             return this;
         }
 

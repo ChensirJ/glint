@@ -55,6 +55,12 @@ public final class HttpResponse {
     private Path filePath;
     private long fileOffset;
     private long fileLength;
+    /** True after {@link #startEventStream()} until the connection is done. */
+    private boolean streaming;
+    /** When true, VtServer must not reuse the socket for keep-alive. */
+    private boolean closeConnection;
+    /** Body bytes written after headers (streamed or finished). */
+    private long bytesWritten;
 
     public HttpResponse(OutputStream out) {
         this(out, null);
@@ -375,18 +381,127 @@ public final class HttpResponse {
         return bos.toByteArray();
     }
 
+
+    /**
+     * Commit headers for a {@code text/event-stream} body and leave the connection
+     * open for {@link #writeStream(byte[])} calls. Sets {@code Connection: close}
+     * so the client sees EOF when the stream ends. Idempotent finish is a no-op
+     * afterwards; the server closes the socket instead of keep-alive reuse.
+     */
+    public void startEventStream() throws IOException {
+        if (committed) {
+            throw new IllegalStateException("Response already committed");
+        }
+        this.status = 200;
+        this.filePath = null;
+        this.body = new byte[0];
+        headers.put("Content-Type", "text/event-stream; charset=utf-8");
+        headers.putIfAbsent("Cache-Control", "no-cache");
+        headers.put("Connection", "close");
+        headers.remove("Content-Length");
+        writeHeadersWithoutLength();
+        committed = true;
+        streaming = true;
+        closeConnection = true;
+    }
+
+    /** True while an SSE (or other early-commit) stream is active. */
+    public boolean streaming() {
+        return streaming;
+    }
+
+    /** True when the server should close the socket after this response. */
+    public boolean closeConnection() {
+        return closeConnection;
+    }
+
+    /**
+     * Body bytes sent so far: streamed writes, or the finished Content-Length body
+     * (file region length or in-memory body). Useful for access logs.
+     */
+    public long bytesWritten() {
+        if (streaming || bytesWritten > 0) {
+            return bytesWritten;
+        }
+        if (filePath != null) {
+            return fileLength;
+        }
+        return body == null ? 0L : body.length;
+    }
+
+    /** Write raw body bytes on a committed stream (SSE). Flushes. */
+    public void writeStream(byte[] data) throws IOException {
+        if (!streaming) {
+            throw new IllegalStateException("Response is not streaming");
+        }
+        if (data == null || data.length == 0) {
+            return;
+        }
+        out.write(data);
+        out.flush();
+        bytesWritten += data.length;
+    }
+
+    public void flushStream() throws IOException {
+        if (!streaming) {
+            throw new IllegalStateException("Response is not streaming");
+        }
+        out.flush();
+    }
+
+    /** End an SSE stream (flush). Safe to call more than once. */
+    public void endEventStream() throws IOException {
+        if (!streaming) {
+            return;
+        }
+        out.flush();
+        streaming = false;
+    }
+
+    private void writeHeadersWithoutLength() throws IOException {
+        StringBuilder sb = new StringBuilder(256);
+        sb.append("HTTP/1.1 ").append(status).append(' ').append(reason(status)).append("\r\n");
+        for (Map.Entry<String, String> e : headers.entrySet()) {
+            if (isSetCookie(e.getKey())) {
+                continue;
+            }
+            if ("content-length".equalsIgnoreCase(e.getKey())) {
+                continue;
+            }
+            sb.append(e.getKey()).append(": ").append(e.getValue()).append("\r\n");
+        }
+        for (String c : setCookies) {
+            sb.append("Set-Cookie: ").append(c).append("\r\n");
+        }
+        sb.append("\r\n");
+        byte[] headerBytes = sb.toString().getBytes(StandardCharsets.US_ASCII);
+        // Streamed responses always use the OutputStream path so we never mix
+        // BufferedOutputStream writes with SocketChannel on the same socket.
+        out.write(headerBytes);
+        out.flush();
+    }
     public void finish() throws IOException {
         finish(null);
     }
 
     public void finish(HttpMethod method) throws IOException {
         if (committed) {
+            if (streaming) {
+                try {
+                    out.flush();
+                } catch (IOException ignored) {
+                    // best effort on teardown
+                }
+            }
             return;
         }
         committed = true;
         boolean head = suppressBody || method == HttpMethod.HEAD;
         long contentLength = filePath != null ? fileLength : body.length;
         headers.put("Content-Length", Long.toString(contentLength));
+        if (!head) {
+            bytesWritten = contentLength;
+        }
         headers.putIfAbsent("Connection", "keep-alive");
 
         StringBuilder sb = new StringBuilder(256);
