@@ -7,7 +7,7 @@
 [![Java](https://img.shields.io/badge/Java-21%2B-orange)](https://openjdk.org/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Maven](https://img.shields.io/badge/Maven-multi--module-brightgreen)](pom.xml)
-[![Build](https://img.shields.io/badge/build-passing-success)](https://github.com/ChensirJ/glint)
+[![CI](https://github.com/ChensirJ/glint/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ChensirJ/glint/actions/workflows/ci.yml)
 
 > **Drop-in virtual-thread server with built-in diagnostics  - see why your request is slow.**
 
@@ -53,7 +53,7 @@ cd ..\glint-demo
 | `glint-servlet` | Jakarta Servlet 6 adapter (sessions, multipart `Part`s, async stub) |
 | `glint-spring-boot-starter` | Drop-in Tomcat replacement |
 | `glint-examples` | Standalone + Spring Boot demos |
-| `glint-bench` | Throughput / latency microbench harness |
+| `glint-bench` | Glint vs Tomcat harness: `/hello`, static files, and a realistic suite (blocking I/O sweep, JSON + DB wait, mixed traffic, keep-alive vs short connections, uploads) |
 
 ## Quick start - standalone
 
@@ -191,7 +191,7 @@ Sessions, cookies, multipart uploads, and Spring MVC mapping work through the
 - Methods: GET, HEAD, POST, PUT, DELETE, PATCH, OPTIONS
 - Query string, path params `{id}`, greedy `{*path}`
 - Bodies: `Content-Length`, **chunked**, **`multipart/form-data`** (size-limited)
-- **Static mounts**: `Glint.staticFiles(prefix, Path[, StaticOptions])` and `classpathFiles(prefix, root)` with MIME, HEAD, `Range`, path-traversal checks, **ETag** / **Last-Modified**, conditional **304**, **small-file cache**, **zero-copy** `FileChannel.transferTo` for large files on plain TCP, **precompressed** `.br`/`.gz` siblings (`Content-Encoding` + `Vary`), and **immutable** `Cache-Control` for fingerprinted names
+- **Static mounts**: `Glint.staticFiles(prefix, Path[, StaticOptions])` and `classpathFiles(prefix, root)` with MIME, HEAD, `Range`, path-traversal checks, **ETag** / **Last-Modified**, conditional **304**, **small-file cache** plus a per-path metadata cache (no filesystem calls on hot hits; edits visible within `StaticOptions.revalidateMillis`, default 1000 ms), **zero-copy** `FileChannel.transferTo` for large files on plain TCP, **precompressed** `.br`/`.gz` siblings (`Content-Encoding` + `Vary`), and **immutable** `Cache-Control` for fingerprinted names
 - Limits / idle timeout / **fast graceful shutdown** (force-closes keep-alive sockets)
 - Optional **TLS** via `ServerConfig.builder().sslContext(SSLContext)`
 - Diagnostics: `/_vt`, metrics, slow, pinning, **`/_vt/api/otlp/v1/metrics`** (OTLP/HTTP JSON, no SDK dep)
@@ -230,38 +230,54 @@ public class Main {
 
 ## Benchmarks
 
-Side-by-side harness (`glint-bench`) starts **Glint** and **Tomcat embed 10.1.24** on ephemeral ports, then hits the same paths with Java `HttpClient` (HTTP/1.1, virtual-thread workers). Defaults: warmup 2s, measure 5s, concurrency 64.
+All numbers below come from `glint-bench` on one machine (AMD Ryzen 7 7840HS, 16 logical cores, 31 GiB RAM, Windows 11, OpenJDK 21.0.8) against **Tomcat embed 10.1.24** with default settings (NIO connector, `maxThreads` 200). Full tables, method, and caveats: [`docs/bench-results.md`](docs/bench-results.md). Reproduce everything with:
 
-Full tables: [`docs/bench-results.md`](docs/bench-results.md).
-
-### `/hello` (text)
-
-Captured **2026-10-30 15:21:06 CST** (Asia/Shanghai).
-
-| Server | req/s | errors | p50 (ms) | p99 (ms) | max (ms) |
-|--------|------:|-------:|---------:|---------:|---------:|
-| Glint | 58,887 | 0 | 1.01 | 2.85 | 9.27 |
-| Tomcat embed | 58,084 | 0 | 1.03 | 2.79 | 26.29 |
-
-### Static files (Glint `staticFiles` vs Tomcat `DefaultServlet`)
-
-Captured **2026-10-30 15:21:18 CST** (Asia/Shanghai). Sizes 1 KiB / 100 KiB / 2 MiB.
-
-| Size | Glint req/s | Tomcat req/s | Note |
-|------|------------:|-------------:|------|
-| 1 KiB | 9,214 | 20,081 | Tomcat ahead on tiny hot files this run |
-| 100 KiB | 7,012 | 7,353 | Roughly tied |
-| 2 MiB | 333 | 371 | Roughly tied (Glint uses zero-copy `transferTo`) |
-
-> Numbers are machine-local and not a guarantee of production ranking. Re-run before quoting. Static results are honest: Glint trades some tiny-file throughput for ETag/304, precompressed siblings, and `/_vt` cache metrics.
-
-```bash
-mvn -pl glint-bench -am -q package
-mvn -pl glint-bench -q exec:java -Dexec.mainClass=io.github.glint.bench.ComparisonBench -Dexec.args="2 5 64"
-# StaticBench: java -cp glint-bench/target/classes:glint-core/target/classes:... io.github.glint.bench.StaticBench
-.\scripts\run-bench.ps1
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/run-bench.ps1   # -Rounds 3 -Warmup 3 -Duration 8
 ```
 
+Numbers are machine-local, loopback-only, and not a guarantee of production ranking. Re-run before quoting.
+
+### Realistic suite (same handlers on both servers, separate JVMs, median of 3 rounds)
+
+Captured **2026-10-30 15:56 CST** (Asia/Shanghai). Each server runs in its own JVM (`-Xms256m -Xmx1g`); handlers are the same `BenchApp` code; the load generator is a separate JVM using raw HTTP/1.1 sockets on virtual threads. Every cell finished with 0 errors, 0 connect errors, and 0 timeouts.
+
+| Scenario | Clients | Glint req/s | Tomcat req/s | Glint p99 ms | Tomcat p99 ms | Winner |
+|----------|--------:|------------:|-------------:|-------------:|--------------:|--------|
+| Blocking downstream (50 ms) | 100 | 1,588 | 1,588 | 64.7 | 67.9 | Tie |
+| Blocking downstream (50 ms) | 500 | 7,925 | 3,181 | 64.3 | 188.0 | Glint |
+| Blocking downstream (50 ms) | 1000 | 15,875 | 3,124 | 64.6 | 316.3 | Glint |
+| Blocking downstream (50 ms) | 2000 | 31,788 | 2,997 | 66.2 | 631.5 | Glint |
+| Blocking downstream (50 ms) | 4000 | 56,031 | 2,738 | 81.4 | 1,262.8 | Glint |
+| JSON parse + 15 ms DB wait + CPU | 200 | 6,421 | 11,848 | 35.7 | 21.5 | **Tomcat** |
+| JSON parse + 15 ms DB wait + CPU | 1000 | 24,436 | 12,035 | 68.5 | 100.9 | Glint |
+| Mixed: 70% API / 20% 4 KiB / 10% 1 MiB static | 500 | 24,520 | 18,401 | 74.1 | 49.6 | Glint on req/s, **Tomcat** on p99 |
+| Keep-alive tiny JSON | 64 | 84,771 | 85,244 | 2.1 | 2.3 | Tie |
+| New connection per request | 64 | 20,714 | 17,759 | 4.5 | 5.2 | Glint |
+| 1 MiB upload (read + CRC32) | 64 | 1,018 | 3,653 | 113.5 | 42.4 | **Tomcat** |
+
+Peak platform threads: Glint 33-41 vs Tomcat 212 in every scenario. Memory goes both ways. For example, at JSON 1000 clients Glint peaked at 618 MiB heap / 766 MiB RSS against Tomcat's 361 / 516 MiB, at twice the throughput.
+
+What this shows, including where Tomcat wins:
+
+- **Blocking I/O is the Glint case.** Tomcat is capped near `maxThreads / latency` (200 / ~62 ms = ~3.2k req/s), and its queueing latency grows with clients. Glint keeps one virtual thread per connection, so throughput scales with clients and p50 stays at the downstream latency until the CPU saturates.
+- **Tomcat wins uploads by ~3.6x.** Glint buffers the whole request body in a `byte[]` before the handler runs (a 1 MiB humongous allocation per request in G1). Tomcat streams it through small buffers. A streaming request-body API is on the roadmap.
+- **Tomcat wins JSON + DB wait at 200 clients.** At this load Tomcat's 200 platform threads are enough. In Glint, the simulated DB wait is `Thread.sleep` on a virtual thread. On Windows with JDK 21 that is coarser under load: a micro-check with 200 staggered sleepers measured `sleep(15)` at 21.05 ms on virtual threads vs 15.48 ms on platform threads. That explains part of the gap, not all of it. Above 200 clients Glint pulls ahead.
+- **Mixed traffic:** Glint serves more requests, but its API p99 is worse than Tomcat's (76 vs 50 ms) in the median round, and Glint's round-to-round spread was wider (22.6k-28.9k req/s).
+- Keep-alive tiny responses are a tie. With a new connection per request, Glint is ~17% ahead.
+
+### `/hello` and static files (in-process microbench, 64 clients, warmup 2s + 5s)
+
+Captured **2026-10-30 15:55 CST** (Asia/Shanghai). Java `HttpClient` load in the same JVM as the server under test.
+
+| Case | Glint req/s | Tomcat req/s | Glint p99 ms | Tomcat p99 ms |
+|------|------------:|-------------:|-------------:|--------------:|
+| `/hello` text | 94,430 | 50,971 | 2.07 | 4.50 |
+| Static 1 KiB | 50,039 | 17,155 | 5.04 | 8.12 |
+| Static 100 KiB | 10,637 | 5,734 | 24.91 | 19.26 |
+| Static 2 MiB | 282 | 243 | 401.88 | 421.08 |
+
+Static 1 KiB before this release: Glint 9,214 vs Tomcat 20,081 req/s. Profiling showed about five filesystem metadata calls per request (`isDirectory`, `isRegularFile`, two sibling probes for `.gz`/`.br`, `readAttributes`), which are expensive on Windows, plus a second write syscall for the body. Glint now caches the resolved path, siblings, and precomputed ETag / Last-Modified strings per mount for `revalidateMillis` (default 1000 ms; Tomcat's resource cache uses a 5 s TTL by default), and it writes header + small body in one gathering write. Run-to-run variance on this laptop is large. A standalone run at 15:44 CST measured 1 KiB at 88,823 vs 19,966 req/s, 100 KiB at 14,842 vs 7,144, and 2 MiB at 358 vs 395, with Tomcat ahead on 2 MiB. So treat 2 MiB as a tie, and note that Tomcat's 100 KiB p99 was better in the run above.
 
 ## OpenTelemetry
 
@@ -291,7 +307,8 @@ Requires **JDK 21+** and **Maven 3.9+**.
 - [x] Path params, middleware, diagnostics JSON + `/_vt` dashboard
 - [x] OTLP/HTTP JSON metrics endpoint + ObsExporter SPI
 - [x] Optional TLS via SSLContext
-- [x] Microbench module (`glint-bench`)
+- [x] Benchmark module (`glint-bench`): microbench, static files, realistic Glint vs Tomcat suite
+- [x] GitHub Actions CI (`mvn -B clean verify`, JDK 21) and tag-driven release workflow
 - [x] Servlet adapter + Spring Boot starter (Hello World)
 - [ ] Full OTLP trace export / SDK bridge module
 - [x] Servlet sessions (`JSESSIONID`), multipart `Part`s, async `startAsync`/`complete` stub
@@ -301,6 +318,8 @@ Requires **JDK 21+** and **Maven 3.9+**.
 - [x] Static ETag / Last-Modified / 304
 - [x] Rate-limit counters on `/_vt` (`rateLimit.allowed` / `rejected`)
 - [x] Multi `Set-Cookie` header support (`HttpResponse.cookie`)
+- [ ] Streaming request bodies (large uploads without full buffering)
+- [ ] Linux re-run of the realistic suite and an open-loop (wrk2-style) generator
 - [ ] Published JMH vs Tomcat / Undertow / Jetty with CI numbers
 - [ ] GraalVM native-image recipe for standalone mode
 
