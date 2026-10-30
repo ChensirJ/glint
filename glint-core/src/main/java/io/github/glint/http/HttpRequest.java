@@ -1,6 +1,11 @@
 package io.github.glint.http;
 
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.io.InputStream;
 import java.net.URLDecoder;
+import java.nio.channels.Channels;
+import java.nio.channels.ReadableByteChannel;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.util.Collections;
@@ -15,6 +20,11 @@ import java.util.Optional;
  * Parsed HTTP/1.1 request view.
  * Path parameters are filled in by the router after matching.
  * Query parameters are decoded lazily from the raw query string.
+ *
+ * <p>Request bodies are streamed by default. Prefer {@link #bodyStream()} or
+ * {@link #bodyChannel()} for large uploads. {@link #bodyBytes()} and
+ * {@link #bodyText()} still buffer the whole body for small payloads and for
+ * callers such as multipart parsing.
  */
 public final class HttpRequest {
 
@@ -23,11 +33,38 @@ public final class HttpRequest {
     private final String path;
     private final String query;
     private final Map<String, String> headers;
-    private final byte[] body;
+    /** Declared Content-Length, or -1 when chunked / absent. */
+    private final long declaredContentLength;
+    private final InputStream bodyIn;
     private final Map<String, String> pathParams = new LinkedHashMap<>();
     private Map<String, String> queryParams;
+    private byte[] cachedBody;
+    private boolean streamOpened;
 
+    /**
+     * Construct a request whose body is already fully buffered (tests and
+     * in-memory adapters).
+     */
     public HttpRequest(HttpMethod method, String rawTarget, Map<String, String> headers, byte[] body) {
+        this(method, rawTarget, headers,
+                body == null ? 0L : body.length,
+                null,
+                body == null ? new byte[0] : body);
+    }
+
+    /**
+     * Construct a request whose body is read on demand from {@code bodyIn}.
+     * Package-private: used by {@link HttpParser}.
+     *
+     * @param declaredContentLength Content-Length value, or -1 if chunked / unknown
+     */
+    HttpRequest(HttpMethod method, String rawTarget, Map<String, String> headers,
+                long declaredContentLength, InputStream bodyIn) {
+        this(method, rawTarget, headers, declaredContentLength, bodyIn, null);
+    }
+
+    private HttpRequest(HttpMethod method, String rawTarget, Map<String, String> headers,
+                        long declaredContentLength, InputStream bodyIn, byte[] cached) {
         this.method = method;
         this.rawPath = rawTarget;
         int q = rawTarget.indexOf('?');
@@ -39,7 +76,15 @@ public final class HttpRequest {
             this.query = "";
         }
         this.headers = Collections.unmodifiableMap(new LinkedHashMap<>(headers));
-        this.body = body == null ? new byte[0] : body;
+        this.declaredContentLength = declaredContentLength;
+        this.cachedBody = cached;
+        if (cached != null) {
+            this.bodyIn = new ByteArrayInputStream(cached);
+        } else if (bodyIn != null) {
+            this.bodyIn = bodyIn;
+        } else {
+            this.bodyIn = InputStream.nullInputStream();
+        }
     }
 
     private static String decodePath(String p) {
@@ -89,8 +134,57 @@ public final class HttpRequest {
         return Optional.ofNullable(v);
     }
 
+    /**
+     * Declared {@code Content-Length}, or {@code -1} when the body is chunked
+     * or no length was advertised.
+     */
+    public long contentLength() {
+        return declaredContentLength;
+    }
+
+    /**
+     * Stream the request body without buffering it all in memory.
+     * Closing the stream does not close the connection. Do not mix with
+     * {@link #bodyBytes()} after bytes have already been read from this stream.
+     */
+    public InputStream bodyStream() {
+        if (cachedBody != null) {
+            return new ByteArrayInputStream(cachedBody);
+        }
+        streamOpened = true;
+        return bodyIn;
+    }
+
+    /**
+     * Channel view of {@link #bodyStream()}. Closing the channel does not close
+     * the connection.
+     */
+    public ReadableByteChannel bodyChannel() {
+        return Channels.newChannel(bodyStream());
+    }
+
+    /**
+     * Buffer the entire body into a byte array (lazy). Prefer
+     * {@link #bodyStream()} for large uploads.
+     *
+     * @throws IllegalStateException if {@link #bodyStream()} was already read from
+     */
     public byte[] bodyBytes() {
-        return body;
+        if (cachedBody != null) {
+            return cachedBody;
+        }
+        if (streamOpened) {
+            throw new IllegalStateException(
+                    "Request body is already being streamed; use bodyStream() only, or call bodyBytes() first");
+        }
+        try {
+            cachedBody = bodyIn.readAllBytes();
+        } catch (HttpException he) {
+            throw he;
+        } catch (IOException e) {
+            throw new HttpException(400, "Failed to read request body: " + e.getMessage());
+        }
+        return cachedBody;
     }
 
     public String bodyText() {
@@ -98,7 +192,27 @@ public final class HttpRequest {
     }
 
     public String bodyText(Charset charset) {
-        return new String(body, charset);
+        return new String(bodyBytes(), charset);
+    }
+
+    /**
+     * Discard any unread body bytes so the next keep-alive request can be parsed.
+     * No-op when the body was fully read or buffered.
+     */
+    void drainBody() throws IOException {
+        if (cachedBody != null) {
+            return;
+        }
+        if (bodyIn instanceof ContentLengthInputStream cl) {
+            cl.drain();
+        } else if (bodyIn instanceof ChunkedInputStream ch) {
+            ch.drain();
+        } else {
+            byte[] buf = new byte[8192];
+            while (bodyIn.read(buf) >= 0) {
+                // discard
+            }
+        }
     }
 
     /**
@@ -146,6 +260,7 @@ public final class HttpRequest {
     /**
      * Parse {@code multipart/form-data} using {@link ServerConfig#defaults()}.
      * Returns an empty form when Content-Type is not multipart.
+     * Buffers the body via {@link #bodyBytes()}.
      */
     public MultipartForm multipart() {
         return MultipartParser.parse(this, ServerConfig.defaults());
@@ -156,7 +271,7 @@ public final class HttpRequest {
         return MultipartParser.parse(this, config);
     }
 
-        static Map<String, String> parseQuery(String raw) {
+    static Map<String, String> parseQuery(String raw) {
         Map<String, String> map = new LinkedHashMap<>();
         if (raw == null || raw.isEmpty()) {
             return Collections.unmodifiableMap(map);

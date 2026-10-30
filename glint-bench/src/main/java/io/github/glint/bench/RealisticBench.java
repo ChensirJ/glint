@@ -707,7 +707,7 @@ public final class RealisticBench {
                 .append(" ms wait + 1 KiB JSON), 20% 4 KiB static CSS, 10% 1 MiB static file\n");
         sb.append("- keep-alive vs conn-per-req: `GET /api/hello` tiny JSON; conn-per-req sends ")
                 .append("`Connection: close` and opens a new TCP connection for every request\n");
-        sb.append("- upload-1MiB: `POST /api/upload` with a 1 MiB body, handler reads it fully and returns CRC32\n\n");
+        sb.append("- upload-1MiB: `POST /api/upload` with a 1 MiB body; handler streams via bodyStream() and returns CRC32\n\n");
         sb.append("| Scenario | Clients | Server | req/s (median) | req/s min-max | p50 ms | p99 ms | p99.9 ms | errors | connect errors | timeouts | heap peak MiB | RSS MiB | platform threads peak |\n");
         sb.append("|----------|--------:|--------|---------------:|---------------|-------:|-------:|---------:|-------:|---------------:|---------:|--------------:|--------:|----------------------:|\n");
         StringBuilder classes = new StringBuilder();
@@ -741,7 +741,7 @@ public final class RealisticBench {
                 .append(" s. The generator closes sockets with SO_LINGER=0 (RST) to avoid client TIME_WAIT exhaustion.\n");
         sb.append("\nCaveats: closed-loop load (a slow server also slows the generator, so tail latency is ")
                 .append("understated versus an open-loop tool such as wrk2); generator and server share the same CPU; ")
-                .append("Glint buffers request bodies in memory (up to maxRequestBodyBytes) while Tomcat streams them; ")
+                .append("Glint streams request bodies via bodyStream()/bodyChannel() (bodyBytes() still buffers when called); ")
                 .append("platform-thread counts exclude Glint's virtual threads by design; ")
                 .append("simulated waits use Thread.sleep, and on Windows JDK 21 virtual-thread timed sleeps are ")
                 .append("coarser under load than platform-thread sleeps, which penalizes Glint in sleep-heavy cells.\n");
@@ -749,10 +749,152 @@ public final class RealisticBench {
         Path out = Path.of("docs", "bench-results.md");
         String existing = Files.exists(out) ? Files.readString(out) : "# Glint benchmarks\n";
         int cut = existing.indexOf("\n## Realistic suite");
+        String previousSection = cut >= 0 ? existing.substring(cut + 1) : "";
         if (cut >= 0) {
             existing = existing.substring(0, cut);
         }
-        Files.writeString(out, existing.stripTrailing() + "\n" + sb);
+        String section = sb.toString();
+        // Filtered runs only replace matching scenario rows so other cells stay.
+        if (!previousSection.isEmpty() && results.size() < scenarios().size()) {
+            section = mergeRealisticSection(previousSection, section, results.keySet());
+        }
+        Files.writeString(out, existing.stripTrailing() + "\n" + section);
         System.out.println("Wrote " + out.toAbsolutePath());
+    }
+
+    /**
+     * Keep rows from {@code previous} whose scenario title was not re-measured.
+     * Header, scenario blurb, caveats, and any breakdown tables come from {@code previous},
+     * except the Captured line and the buffering caveat which are refreshed from {@code fresh}.
+     */
+    static String mergeRealisticSection(String previous, String fresh,
+                                        java.util.Set<Scenario> updated) {
+        java.util.Set<String> titles = new java.util.HashSet<>();
+        for (Scenario s : updated) {
+            titles.add(s.title());
+        }
+        java.util.Map<String, java.util.List<String>> freshRows = new java.util.LinkedHashMap<>();
+        for (String line : fresh.split("\n", -1)) {
+            if (!isMainResultRow(line)) {
+                continue;
+            }
+            String title = tableTitle(line);
+            if (title == null || !titles.contains(title)) {
+                continue;
+            }
+            freshRows.computeIfAbsent(title, k -> new java.util.ArrayList<>()).add(line);
+        }
+        String captured = null;
+        for (String line : fresh.split("\n", -1)) {
+            if (line.startsWith("- Captured:")) {
+                captured = line;
+                break;
+            }
+        }
+        StringBuilder out = new StringBuilder();
+        boolean inMainTable = false;
+        boolean mainHeaderSeen = false;
+        for (String line : previous.split("\n", -1)) {
+            if (captured != null && line.startsWith("- Captured:")) {
+                out.append(captured).append('\n');
+                continue;
+            }
+            if (line.contains("Glint buffers request bodies") || line.contains("Glint streams request bodies")) {
+                String caveatLine = null;
+                for (String fl : fresh.split("\n", -1)) {
+                    if (fl.contains("Glint streams request bodies") || fl.contains("Glint buffers request bodies")) {
+                        caveatLine = fl;
+                        break;
+                    }
+                }
+                out.append(caveatLine != null ? caveatLine : line).append('\n');
+                continue;
+            }
+            if (line.contains("handler reads it fully and returns CRC32")
+                    || line.contains("handler streams via bodyStream()")) {
+                String uploadBlurb = null;
+                for (String fl : fresh.split("\n", -1)) {
+                    if (fl.contains("upload-1MiB:")) {
+                        uploadBlurb = fl;
+                        break;
+                    }
+                }
+                out.append(uploadBlurb != null ? uploadBlurb : line).append('\n');
+                continue;
+            }
+            if (line.startsWith("| Scenario |")) {
+                inMainTable = true;
+                mainHeaderSeen = true;
+                out.append(line).append('\n');
+                continue;
+            }
+            if (inMainTable && line.startsWith("|---")) {
+                out.append(line).append('\n');
+                continue;
+            }
+            if (inMainTable && isMainResultRow(line)) {
+                String title = tableTitle(line);
+                if (title != null && titles.contains(title)) {
+                    if (freshRows.containsKey(title)) {
+                        for (String fr : freshRows.remove(title)) {
+                            out.append(fr).append('\n');
+                        }
+                    }
+                    continue;
+                }
+                out.append(line).append('\n');
+                continue;
+            }
+            if (inMainTable) {
+                for (java.util.List<String> rows : freshRows.values()) {
+                    for (String fr : rows) {
+                        out.append(fr).append('\n');
+                    }
+                }
+                freshRows.clear();
+                inMainTable = false;
+            }
+            out.append(line).append('\n');
+        }
+        if (inMainTable) {
+            for (java.util.List<String> rows : freshRows.values()) {
+                for (String fr : rows) {
+                    out.append(fr).append('\n');
+                }
+            }
+        }
+        if (!mainHeaderSeen) {
+            return fresh.endsWith("\n") ? fresh : fresh + "\n";
+        }
+        String s = out.toString();
+        return s.endsWith("\n") ? s : s + "\n";
+    }
+
+    /** True for data rows of the main Scenario/Clients/Server table (not breakdown). */
+    static boolean isMainResultRow(String line) {
+        if (!line.startsWith("| ") || line.startsWith("| Scenario") || line.startsWith("|---")) {
+            return false;
+        }
+        String title = tableTitle(line);
+        if (title == null || title.isEmpty()) {
+            return false;
+        }
+        String[] parts = line.split("\\|", -1);
+        if (parts.length < 5) {
+            return false;
+        }
+        String server = parts[3].trim();
+        return server.equals("Glint") || server.equals("Tomcat");
+    }
+
+    static String tableTitle(String row) {
+        if (!row.startsWith("| ")) {
+            return null;
+        }
+        int a = row.indexOf('|', 1);
+        if (a < 0) {
+            return null;
+        }
+        return row.substring(1, a).trim();
     }
 }

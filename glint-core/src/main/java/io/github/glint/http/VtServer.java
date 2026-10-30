@@ -170,6 +170,14 @@ public final class VtServer implements AutoCloseable {
                     Trace.noteActive(-1);
                 }
                 try {
+                    req.drainBody();
+                } catch (IOException drainEx) {
+                    return;
+                } catch (HttpException he) {
+                    // Oversized chunked body discovered while draining: close connection.
+                    return;
+                }
+                try {
                     resp.finish(req.method());
                 } catch (IOException ioe) {
                     return;

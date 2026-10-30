@@ -21,7 +21,7 @@ import jakarta.servlet.http.HttpUpgradeHandler;
 import jakarta.servlet.http.Part;
 
 import java.io.BufferedReader;
-import java.io.ByteArrayInputStream;
+import java.io.InputStream;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.UnsupportedEncodingException;
@@ -260,16 +260,33 @@ public final class GlintHttpServletRequest implements HttpServletRequest {
     @Override public void setCharacterEncoding(String env) throws UnsupportedEncodingException {
         this.characterEncoding = env;
     }
-    @Override public int getContentLength() { return delegate.bodyBytes().length; }
-    @Override public long getContentLengthLong() { return delegate.bodyBytes().length; }
+    @Override public int getContentLength() {
+        long n = getContentLengthLong();
+        return n > Integer.MAX_VALUE ? -1 : (int) n;
+    }
+    @Override public long getContentLengthLong() { return delegate.contentLength(); }
     @Override public String getContentType() { return getHeader("content-type"); }
     @Override public ServletInputStream getInputStream() {
-        ByteArrayInputStream bais = new ByteArrayInputStream(delegate.bodyBytes());
+        InputStream raw = delegate.bodyStream();
         return new ServletInputStream() {
-            @Override public boolean isFinished() { return bais.available() == 0; }
+            private boolean finished;
+            @Override public boolean isFinished() { return finished; }
             @Override public boolean isReady() { return true; }
             @Override public void setReadListener(jakarta.servlet.ReadListener readListener) { }
-            @Override public int read() { return bais.read(); }
+            @Override public int read() throws IOException {
+                int b = raw.read();
+                if (b < 0) {
+                    finished = true;
+                }
+                return b;
+            }
+            @Override public int read(byte[] b, int off, int len) throws IOException {
+                int n = raw.read(b, off, len);
+                if (n < 0) {
+                    finished = true;
+                }
+                return n;
+            }
         };
     }
     @Override public String getParameter(String name) {
@@ -286,8 +303,7 @@ public final class GlintHttpServletRequest implements HttpServletRequest {
     @Override public String getServerName() { return "localhost"; }
     @Override public int getServerPort() { return 80; }
     @Override public BufferedReader getReader() {
-        return new BufferedReader(new InputStreamReader(
-                new ByteArrayInputStream(delegate.bodyBytes()), StandardCharsets.UTF_8));
+        return new BufferedReader(new InputStreamReader(delegate.bodyStream(), StandardCharsets.UTF_8));
     }
     @Override public String getRemoteAddr() { return "127.0.0.1"; }
     @Override public String getRemoteHost() { return "127.0.0.1"; }

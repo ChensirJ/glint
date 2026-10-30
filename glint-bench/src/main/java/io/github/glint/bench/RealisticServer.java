@@ -9,7 +9,6 @@ import org.apache.catalina.Context;
 import org.apache.catalina.servlets.DefaultServlet;
 import org.apache.catalina.startup.Tomcat;
 
-import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.lang.management.ManagementFactory;
 import java.lang.management.MemoryMXBean;
@@ -58,7 +57,7 @@ public final class RealisticServer {
                 .get("/api/item", (req, resp) -> resp.json(BenchApp.item(req.queryParam("id").orElse("0"))))
                 .post("/api/order", (req, resp) -> resp.json(BenchApp.order(req.bodyBytes())))
                 .post("/api/upload", (req, resp) ->
-                        resp.json(BenchApp.upload(new ByteArrayInputStream(req.bodyBytes()))))
+                        resp.json(BenchApp.upload(req.bodyStream())))
                 .get("/_bench/stats", (req, resp) -> resp.text(snapshotAndReset()))
                 .staticFiles("/static", root.resolve("static"))
                 .startAsync();

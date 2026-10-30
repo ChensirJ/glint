@@ -1,7 +1,5 @@
 package io.github.glint.http;
 
-import java.io.ByteArrayOutputStream;
-import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
@@ -12,9 +10,12 @@ import java.util.Map;
 /**
  * HTTP/1.1 request parser.
  * Supports request-line, headers, {@code Content-Length} bodies, and
- * chunked transfer encoding decode for request bodies.
+ * chunked transfer encoding for request bodies.
  *
- * <p>Enforces header-line and body size limits from {@link ServerConfig}.
+ * <p>Headers are parsed eagerly; the body is exposed as a stream on
+ * {@link HttpRequest} so large uploads need not be buffered. Size limits from
+ * {@link ServerConfig} still apply ({@code Content-Length} over the limit is
+ * rejected before the handler runs; chunked bodies are limited while reading).
  */
 public final class HttpParser {
 
@@ -82,21 +83,25 @@ public final class HttpParser {
             }
         }
 
-        byte[] body = readBody(in, headers, config);
-        return new HttpRequest(method, target, headers, body);
+        return openBody(method, target, headers, in, config);
     }
 
-    private static byte[] readBody(InputStream in, Map<String, String> headers, ServerConfig config)
-            throws IOException {
+    /**
+     * Attach a streaming body source. Does not read body bytes yet (except
+     * rejecting an oversized Content-Length).
+     */
+    static HttpRequest openBody(HttpMethod method, String target, Map<String, String> headers,
+                                InputStream in, ServerConfig config) {
         String te = headers.getOrDefault("transfer-encoding", "");
         if (te.toLowerCase(Locale.ROOT).contains("chunked")) {
-            return readChunked(in, config.maxRequestBodyBytes());
+            InputStream body = new ChunkedInputStream(in, config.maxRequestBodyBytes());
+            return new HttpRequest(method, target, headers, -1L, body);
         }
-        int contentLength = 0;
         String cl = headers.get("content-length");
         if (cl != null && !cl.isEmpty()) {
+            final long contentLength;
             try {
-                contentLength = Integer.parseInt(cl.trim());
+                contentLength = Long.parseLong(cl.trim());
             } catch (NumberFormatException e) {
                 throw new HttpException(400, "Invalid Content-Length");
             }
@@ -106,77 +111,10 @@ public final class HttpParser {
             if (contentLength > config.maxRequestBodyBytes()) {
                 throw new HttpException(413, "Request body too large");
             }
+            InputStream body = new ContentLengthInputStream(in, contentLength);
+            return new HttpRequest(method, target, headers, contentLength, body);
         }
-        byte[] body = new byte[contentLength];
-        int off = 0;
-        while (off < contentLength) {
-            int n = in.read(body, off, contentLength - off);
-            if (n < 0) {
-                throw new EOFException("Unexpected EOF in body");
-            }
-            off += n;
-        }
-        return body;
-    }
-
-    /**
-     * Decode a chunked body until a zero-size chunk. Trailer headers are discarded.
-     */
-    static byte[] readChunked(InputStream in, int maxBytes) throws IOException {
-        ByteArrayOutputStream buf = new ByteArrayOutputStream(Math.min(8192, maxBytes));
-        while (true) {
-            String sizeLine = readLine(in, 4096);
-            if (sizeLine == null) {
-                throw new HttpException(400, "Unexpected EOF in chunk size");
-            }
-            int semi = sizeLine.indexOf(';');
-            String hex = (semi >= 0 ? sizeLine.substring(0, semi) : sizeLine).trim();
-            final int size;
-            try {
-                size = Integer.parseInt(hex, 16);
-            } catch (NumberFormatException e) {
-                throw new HttpException(400, "Invalid chunk size");
-            }
-            if (size < 0) {
-                throw new HttpException(400, "Negative chunk size");
-            }
-            if (size == 0) {
-                // Consume trailers until empty line.
-                while (true) {
-                    String trailer = readLine(in, 8192);
-                    if (trailer == null || trailer.isEmpty()) {
-                        break;
-                    }
-                }
-                break;
-            }
-            if (buf.size() + size > maxBytes) {
-                throw new HttpException(413, "Request body too large");
-            }
-            byte[] chunk = new byte[size];
-            int off = 0;
-            while (off < size) {
-                int n = in.read(chunk, off, size - off);
-                if (n < 0) {
-                    throw new EOFException("Unexpected EOF in chunk data");
-                }
-                off += n;
-            }
-            buf.write(chunk);
-            // Consume trailing CRLF after chunk data.
-            int c1 = in.read();
-            int c2 = in.read();
-            if (c1 == '\r' && c2 == '\n') {
-                // ok
-            } else if (c1 == '\n') {
-                // bare LF  -  tolerate
-            } else if (c1 < 0) {
-                throw new EOFException("Unexpected EOF after chunk");
-            } else {
-                throw new HttpException(400, "Missing CRLF after chunk");
-            }
-        }
-        return buf.toByteArray();
+        return new HttpRequest(method, target, headers, 0L, InputStream.nullInputStream());
     }
 
     /** Read a single CRLF- or LF-terminated line (without the terminator). */
