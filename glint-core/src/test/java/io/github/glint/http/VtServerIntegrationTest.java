@@ -1,6 +1,7 @@
 package io.github.glint.http;
 
 import io.github.glint.Glint;
+import io.github.glint.http.multipart.MultipartForm;
 import io.github.glint.middleware.Middlewares;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -44,7 +45,7 @@ class VtServerIntegrationTest {
                 .get("/hello", (req, resp) -> resp.text("hi"))
                 .post("/echo", (req, resp) -> resp.json("{\"echo\":\"" + req.bodyText() + "\"}"))
                 .post("/upload", (req, resp) -> {
-                    var form = req.multipart();
+                    MultipartForm form = req.multipart();
                     String title = form.field("title").orElse("");
                     resp.json("{\"title\":\"" + title + "\",\"parts\":" + form.size() + "}");
                 })

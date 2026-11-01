@@ -3,6 +3,7 @@ package io.github.glint.servlet;
 import io.github.glint.http.HttpMethod;
 import io.github.glint.http.HttpRequest;
 import io.github.glint.http.HttpResponse;
+import jakarta.servlet.AsyncContext;
 import jakarta.servlet.http.HttpServlet;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
@@ -92,7 +93,7 @@ class SessionMultipartAsyncTest {
         ctx.addServlet("s", new HttpServlet() {
             @Override
             protected void doGet(HttpServletRequest req, HttpServletResponse resp) {
-                var async = req.startAsync();
+                AsyncContext async = req.startAsync();
                 async.start(() -> {
                     try {
                         resp.setContentType("text/plain");
