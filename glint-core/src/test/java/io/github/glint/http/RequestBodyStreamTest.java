@@ -9,6 +9,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.zip.CRC32;
 
@@ -183,6 +184,87 @@ class RequestBodyStreamTest {
     }
 
     @Test
+    void pipelinedUploadsKeepBothBodies() throws Exception {
+        final int size = 80 * 1024;
+        glint = Glint.create(0)
+                .pinningWatcher(false)
+                .config(ServerConfig.builder()
+                        .maxRequestBodyBytes(1024 * 1024)
+                        .idleTimeoutMs(5_000)
+                        .shutdownWaitMs(1_000)
+                        .build())
+                .post("/upload", (req, resp) -> resp.json(crcJson(req.bodyStream())))
+                .startAsync();
+
+        byte[] first = patterned(size, 3);
+        byte[] second = patterned(size, 9);
+        String req1 = uploadRequest(first, true);
+        String req2 = uploadRequest(second, false);
+        try (Socket socket = new Socket()) {
+            socket.connect(new InetSocketAddress("127.0.0.1", glint.port()), 3_000);
+            socket.setSoTimeout(10_000);
+            OutputStream out = socket.getOutputStream();
+            // Both requests in one write: the large-body read-ahead must not drop the second.
+            out.write(req1.getBytes(StandardCharsets.US_ASCII));
+            out.write(first);
+            out.write(req2.getBytes(StandardCharsets.US_ASCII));
+            out.write(second);
+            out.flush();
+            String both = readAvailable(socket.getInputStream());
+            assertTrue(both.contains(Long.toString(crc(first))), both);
+            assertTrue(both.contains(Long.toString(crc(second))), both);
+            int statuses = 0;
+            int from = 0;
+            while (true) {
+                int at = both.indexOf("HTTP/1.1 200", from);
+                if (at < 0) {
+                    break;
+                }
+                statuses++;
+                from = at + 1;
+            }
+            assertEquals(2, statuses, both);
+        }
+    }
+
+    @Test
+    void bodyChannelMatchesStreamedCrc() throws Exception {
+        final int size = 96 * 1024;
+        glint = Glint.create(0)
+                .pinningWatcher(false)
+                .config(ServerConfig.builder()
+                        .maxRequestBodyBytes(1024 * 1024)
+                        .idleTimeoutMs(5_000)
+                        .shutdownWaitMs(1_000)
+                        .build())
+                .post("/upload", (req, resp) -> {
+                    CRC32 c = new CRC32();
+                    ByteBuffer buf = ByteBuffer.allocate(8 * 1024);
+                    try (var ch = req.bodyChannel()) {
+                        int n;
+                        while ((n = ch.read(buf)) >= 0) {
+                            buf.flip();
+                            c.update(buf);
+                            buf.clear();
+                        }
+                    }
+                    resp.json("{\"crc32\":" + c.getValue() + "}");
+                })
+                .startAsync();
+        byte[] payload = patterned(size, 5);
+        try (Socket socket = new Socket()) {
+            socket.connect(new InetSocketAddress("127.0.0.1", glint.port()), 3_000);
+            socket.setSoTimeout(10_000);
+            OutputStream out = socket.getOutputStream();
+            out.write(uploadRequest(payload, false).getBytes(StandardCharsets.US_ASCII));
+            out.write(payload);
+            out.flush();
+            String resp = readHttpMessage(socket.getInputStream());
+            assertTrue(resp.contains("\"crc32\":" + crc(payload)), resp);
+        }
+    }
+
+    @Test
     void drainUnreadBodyAllowsKeepAlive() throws Exception {
         glint = Glint.create(0)
                 .pinningWatcher(false)
@@ -215,6 +297,64 @@ class RequestBodyStreamTest {
             String resp2 = readHttpMessage(in);
             assertTrue(resp2.contains("next"), resp2);
         }
+    }
+
+    private static String uploadRequest(byte[] body, boolean keepAlive) {
+        return "POST /upload HTTP/1.1\r\nHost: localhost\r\n"
+                + "Connection: " + (keepAlive ? "keep-alive" : "close") + "\r\n"
+                + "Content-Type: application/octet-stream\r\nContent-Length: " + body.length + "\r\n\r\n";
+    }
+
+    private static byte[] patterned(int size, int seed) {
+        byte[] payload = new byte[size];
+        for (int i = 0; i < size; i++) {
+            payload[i] = (byte) (i * seed);
+        }
+        return payload;
+    }
+
+    private static long crc(byte[] payload) {
+        CRC32 c = new CRC32();
+        c.update(payload);
+        return c.getValue();
+    }
+
+    private static String crcJson(InputStream in) throws java.io.IOException {
+        CRC32 c = new CRC32();
+        byte[] buf = new byte[8 * 1024];
+        int r;
+        while ((r = in.read(buf)) != -1) {
+            c.update(buf, 0, r);
+        }
+        return "{\"crc32\":" + c.getValue() + "}";
+    }
+
+    /** Read until the socket is quiet, so pipelined responses stay in one buffer. */
+    private static String readAvailable(InputStream in) throws Exception {
+        byte[] buf = new byte[8 * 1024];
+        java.io.ByteArrayOutputStream got = new java.io.ByteArrayOutputStream();
+        long deadline = System.nanoTime() + 5_000_000_000L;
+        long quietSince = -1L;
+        while (System.nanoTime() < deadline) {
+            if (in.available() > 0) {
+                int r = in.read(buf);
+                if (r < 0) {
+                    break;
+                }
+                got.write(buf, 0, r);
+                quietSince = -1L;
+            } else if (got.size() > 0) {
+                if (quietSince < 0) {
+                    quietSince = System.nanoTime();
+                } else if (System.nanoTime() - quietSince > 150_000_000L) {
+                    break;
+                }
+                Thread.sleep(5);
+            } else {
+                Thread.sleep(5);
+            }
+        }
+        return got.toString(StandardCharsets.ISO_8859_1);
     }
 
     private static String readHttpMessage(InputStream in) throws Exception {

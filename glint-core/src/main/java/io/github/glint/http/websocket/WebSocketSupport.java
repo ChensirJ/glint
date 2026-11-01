@@ -2,11 +2,12 @@ package io.github.glint.http.websocket;
 
 import io.github.glint.http.HttpRequest;
 
-import java.io.BufferedInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.EOFException;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
+import java.nio.channels.ClosedChannelException;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -99,7 +100,7 @@ public final class WebSocketSupport {
     public static boolean maybeUpgrade(Registry registry,
                                        HttpRequest req,
                                        Socket socket,
-                                       BufferedInputStream in,
+                                       InputStream in,
                                        OutputStream out) throws Exception {
         if (registry == null || registry.isEmpty() || !isUpgradeRequest(req)) {
             return false;
@@ -121,7 +122,7 @@ public final class WebSocketSupport {
     }
 
     static void pump(WebSocketSession session, WebSocketHandler handler) throws Exception {
-        BufferedInputStream in = session.input();
+        InputStream in = session.input();
         OutputStream out = session.output();
         ByteArrayOutputStream fragments = null;
         int fragmentOpcode = -1;
@@ -131,6 +132,9 @@ public final class WebSocketSupport {
             try {
                 frame = WebSocketFrames.read(in);
             } catch (EOFException eof) {
+                break;
+            } catch (ClosedChannelException closed) {
+                // Peer close or server shutdown interrupts a blocking channel read.
                 break;
             }
             int opcode = frame.opcode();

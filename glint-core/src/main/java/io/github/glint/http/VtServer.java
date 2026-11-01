@@ -6,8 +6,6 @@ import io.github.glint.router.RouteHandler;
 
 import javax.net.ssl.SSLServerSocket;
 import javax.net.ssl.SSLServerSocketFactory;
-import java.io.BufferedInputStream;
-import java.io.BufferedOutputStream;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
@@ -103,6 +101,13 @@ public final class VtServer implements AutoCloseable {
             while (running.get()) {
                 try {
                     Socket socket = serverSocket.accept();
+                    // Set before the connection thread runs so the handshake window
+                    // is already TCP_NODELAY when the client writes.
+                    try {
+                        socket.setTcpNoDelay(true);
+                    } catch (SocketException ignored) {
+                        // serve() will fail the socket if it is unusable
+                    }
                     openSockets.add(socket);
                     virtualThreads.submit(() -> serve(socket));
                 } catch (SocketException se) {
@@ -120,12 +125,13 @@ public final class VtServer implements AutoCloseable {
 
     private void serve(Socket socket) {
         try (socket;
-             BufferedInputStream in = new BufferedInputStream(socket.getInputStream());
-             BufferedOutputStream out = new BufferedOutputStream(socket.getOutputStream())) {
+             ConnectionInputStream in = new ConnectionInputStream(socket);
+             ConnectionOutputStream out = new ConnectionOutputStream(socket.getOutputStream())) {
             socket.setTcpNoDelay(true);
             if (config.idleTimeoutMs() > 0) {
                 socket.setSoTimeout(config.idleTimeoutMs());
             }
+            boolean uploadTuned = false;
             while (running.get()) {
                 final HttpRequest req;
                 try {
@@ -142,6 +148,16 @@ public final class VtServer implements AutoCloseable {
                     return;
                 }
                 req.remoteAddress(clientAddress(socket));
+                // Large uploads: widen the TCP window, then read through a direct
+                // buffer. Done after the header parse so small requests keep the
+                // default socket buffers (thousands of idle connections stay cheap).
+                if (req.contentLength() >= ConnectionInputStream.LARGE_BODY_BYTES) {
+                    if (!uploadTuned) {
+                        widenReceiveBuffer(socket, req.contentLength());
+                        uploadTuned = true;
+                    }
+                    in.expectLargeBody();
+                }
 
                 // WebSocket upgrade takes over the socket for the rest of its life.
                 try {
@@ -198,6 +214,20 @@ public final class VtServer implements AutoCloseable {
             // Client closed, reset, or server forced close during shutdown.
         } finally {
             openSockets.remove(socket);
+        }
+    }
+
+    /**
+     * Ask the kernel for a receive window large enough to hold the rest of a
+     * big body. Best effort: some OS caps are lower, and the direct buffer
+     * still applies when this call is ignored.
+     */
+    private static void widenReceiveBuffer(Socket socket, long contentLength) {
+        int want = (int) Math.min(1024 * 1024L, Math.max(contentLength, ConnectionInputStream.LARGE_BUFFER));
+        try {
+            socket.setReceiveBufferSize(want);
+        } catch (SocketException ignored) {
+            // streaming still works with the OS default window
         }
     }
 

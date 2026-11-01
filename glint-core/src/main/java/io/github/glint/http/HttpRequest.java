@@ -4,7 +4,8 @@ import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URLDecoder;
-import java.nio.channels.Channels;
+import java.nio.ByteBuffer;
+import java.nio.channels.ClosedChannelException;
 import java.nio.channels.ReadableByteChannel;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
@@ -172,10 +173,10 @@ public final class HttpRequest {
 
     /**
      * Channel view of {@link #bodyStream()}. Closing the channel does not close
-     * the connection.
+     * the connection. Heap buffers are filled in place (no extra copy).
      */
     public ReadableByteChannel bodyChannel() {
-        return Channels.newChannel(bodyStream());
+        return new BodyChannel(bodyStream());
     }
 
     /**
@@ -315,6 +316,56 @@ public final class HttpRequest {
             return URLDecoder.decode(s, StandardCharsets.UTF_8);
         } catch (Exception e) {
             return s;
+        }
+    }
+
+    /**
+     * Reads {@link #bodyStream()} into the caller's buffer. Heap
+     * {@link ByteBuffer}s are filled from their backing array so the upload
+     * path does not allocate a second copy the way
+     * {@code Channels.newChannel(InputStream)} does.
+     */
+    private static final class BodyChannel implements ReadableByteChannel {
+        private final InputStream in;
+        private boolean open = true;
+
+        BodyChannel(InputStream in) {
+            this.in = in;
+        }
+
+        @Override
+        public int read(ByteBuffer dst) throws IOException {
+            if (!open) {
+                throw new ClosedChannelException();
+            }
+            if (!dst.hasRemaining()) {
+                return 0;
+            }
+            if (dst.hasArray()) {
+                int n = in.read(dst.array(), dst.arrayOffset() + dst.position(), dst.remaining());
+                if (n > 0) {
+                    dst.position(dst.position() + n);
+                }
+                return n;
+            }
+            int want = Math.min(dst.remaining(), 16 * 1024);
+            byte[] tmp = new byte[want];
+            int n = in.read(tmp);
+            if (n > 0) {
+                dst.put(tmp, 0, n);
+            }
+            return n;
+        }
+
+        @Override
+        public boolean isOpen() {
+            return open;
+        }
+
+        @Override
+        public void close() {
+            // Do not close the connection. Unread bytes are drained by the server.
+            open = false;
         }
     }
 }
