@@ -6,6 +6,7 @@ import io.github.glint.http.HttpResponse;
 import jakarta.servlet.DispatcherType;
 import jakarta.servlet.Filter;
 import jakarta.servlet.FilterConfig;
+import jakarta.servlet.FilterRegistration;
 import jakarta.servlet.http.HttpFilter;
 import jakarta.servlet.http.HttpServlet;
 import jakarta.servlet.http.HttpServletRequest;
@@ -112,7 +113,7 @@ class FilterChainTest {
     void filterInitReceivesConfigAndDuplicateNameIsRejected() throws Exception {
         GlintServletContext ctx = context();
         List<String> init = new ArrayList<>();
-        var reg = ctx.addFilter("cfg", new HttpFilter() {
+        FilterRegistration.Dynamic reg = ctx.addFilter("cfg", new HttpFilter() {
             @Override
             public void init(FilterConfig config) {
                 init.add(config.getFilterName() + "=" + config.getInitParameter("k"));

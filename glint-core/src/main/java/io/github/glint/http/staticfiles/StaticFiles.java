@@ -27,6 +27,7 @@ import java.util.Locale;
 import java.util.Map;
 import io.github.glint.util.Json;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
@@ -518,7 +519,7 @@ public final class StaticFiles {
      */
     static void serveDirectoryListing(HttpRequest req, HttpResponse resp, Path dir) throws IOException {
         List<Map<String, Object>> entries = new ArrayList<>();
-        try (var stream = Files.list(dir)) {
+        try (Stream<Path> stream = Files.list(dir)) {
             List<Path> children = stream.sorted(Comparator.comparing(p -> p.getFileName().toString().toLowerCase(Locale.ROOT)))
                     .collect(Collectors.toList());
             for (Path child : children) {

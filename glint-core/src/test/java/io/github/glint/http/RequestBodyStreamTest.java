@@ -10,6 +10,7 @@ import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.ByteBuffer;
+import java.nio.channels.ReadableByteChannel;
 import java.nio.charset.StandardCharsets;
 import java.util.zip.CRC32;
 
@@ -240,7 +241,7 @@ class RequestBodyStreamTest {
                 .post("/upload", (req, resp) -> {
                     CRC32 c = new CRC32();
                     ByteBuffer buf = ByteBuffer.allocate(8 * 1024);
-                    try (var ch = req.bodyChannel()) {
+                    try (ReadableByteChannel ch = req.bodyChannel()) {
                         int n;
                         while ((n = ch.read(buf)) >= 0) {
                             buf.flip();
