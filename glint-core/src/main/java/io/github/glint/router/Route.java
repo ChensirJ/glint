@@ -19,6 +19,9 @@ public final class Route {
     private final RouteHandler handler;
     private final Pattern regex;
     private final List<String> paramNames;
+    /** No path parameters: match with {@link String#equals} instead of a {@link Matcher}. */
+    private final boolean literal;
+    private final Router.Match found;
 
     public Route(HttpMethod method, String pattern, RouteHandler handler) {
         this.method = method;
@@ -26,6 +29,8 @@ public final class Route {
         this.handler = handler;
         this.paramNames = new ArrayList<>();
         this.regex = compile(pattern, paramNames);
+        this.literal = paramNames.isEmpty();
+        this.found = Router.Match.found(handler);
     }
 
     public HttpMethod method() {
@@ -38,6 +43,11 @@ public final class Route {
 
     public RouteHandler handler() {
         return handler;
+    }
+
+    /** Cached successful match. Path parameters, when any, are written onto the request. */
+    public Router.Match found() {
+        return found;
     }
 
     /**
@@ -57,6 +67,9 @@ public final class Route {
     }
 
     private boolean bindPath(HttpRequest request) {
+        if (literal) {
+            return pattern.equals(request.path());
+        }
         Matcher m = regex.matcher(request.path());
         if (!m.matches()) {
             return false;

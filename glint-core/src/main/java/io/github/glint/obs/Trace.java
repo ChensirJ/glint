@@ -6,10 +6,10 @@ import io.github.glint.http.HttpRequest;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.LongAdder;
 
 /**
  * Per-request tracing context for JDK 21.
@@ -20,7 +20,9 @@ import java.util.concurrent.atomic.AtomicInteger;
  * connections that reuse the same virtual thread do not leak context.
  *
  * <p>After each request, optional {@link ObsExporter} SPI implementations
- * receive the metrics snapshot and request context.
+ * receive the metrics snapshot and request context. The snapshot is built
+ * only when an exporter is registered, so a keep-alive handler with no
+ * exporter does not allocate the diagnostics maps.
  */
 public final class Trace {
 
@@ -39,43 +41,52 @@ public final class Trace {
 
     public static final Metrics METRICS = new Metrics();
 
-    private static final AtomicInteger ACTIVE = new AtomicInteger();
+    private static final LongAdder ACTIVE = new LongAdder();
+    private static final AtomicLong NEXT_ID = new AtomicLong();
 
     private Trace() {
     }
 
     public static void noteActive(int delta) {
-        ACTIVE.addAndGet(delta);
+        ACTIVE.add(delta);
     }
 
     public static int activeRequests() {
-        return ACTIVE.get();
+        return (int) ACTIVE.sum();
     }
 
     /** Run {@code body} with a fresh request context and record latency metrics. */
     public static void run(HttpRequest req, ThrowingRunnable body) throws Exception {
+        long start = System.nanoTime();
         Ctx ctx = new Ctx(
-                UUID.randomUUID().toString(),
+                Long.toHexString(NEXT_ID.incrementAndGet()),
                 req.path(),
-                System.nanoTime(),
-                new ArrayList<>());
+                start,
+                new ArrayList<>(2));
         long tid = Thread.currentThread().threadId();
+        boolean pins = PinningWatcher.isStarted();
         CURRENT.set(ctx);
-        BY_THREAD.put(tid, ctx);
+        if (pins) {
+            BY_THREAD.put(tid, ctx);
+        }
         try {
             body.run();
         } finally {
             CURRENT.remove();
-            BY_THREAD.remove(tid);
-            long dur = System.nanoTime() - ctx.startNs();
+            if (pins) {
+                BY_THREAD.remove(tid);
+            }
+            long dur = System.nanoTime() - start;
             METRICS.record(req.path(), dur);
             if (dur > 500_000_000L) {
                 SlowLog.dump(ctx, dur);
             }
-            ObsExporters.emitRequest(ctx, dur);
-            // Cheap snapshot fan-out for metric-only exporters (sampled every request;
-            // exporters should be non-blocking).
-            ObsExporters.emitMetrics(METRICS.snapshot());
+            // Exporters are optional. Building the snapshot on every tiny request
+            // allocated several maps and walked the histogram under no listener.
+            if (ObsExporters.hasAny()) {
+                ObsExporters.emitRequest(ctx, dur);
+                ObsExporters.emitMetrics(METRICS.snapshot());
+            }
         }
     }
 

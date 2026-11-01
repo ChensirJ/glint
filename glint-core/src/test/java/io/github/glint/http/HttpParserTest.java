@@ -80,7 +80,68 @@ class HttpParserTest {
     }
 
     @Test
+    void connectionCloseIsCaseInsensitive() throws Exception {
+        HttpRequest req = HttpParser.parseString(crlf(
+                "GET /x HTTP/1.1",
+                "Host: localhost",
+                "Connection: Close",
+                ""));
+        assertFalse(req.keepAlive());
+    }
+
+    @Test
     void returnsNullOnEmptyStream() throws Exception {
         assertNull(HttpParser.parseString(""));
+    }
+
+    @Test
+    void bufferedParserKeepsBodyAndTheNextKeepAliveRequest() throws Exception {
+        byte[] raw = ("POST /up HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\n\r\nabcd"
+                + "GET /next?x=1 HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+                .getBytes(StandardCharsets.US_ASCII);
+        ConnectionInputStream in = new ConnectionInputStream(new java.io.ByteArrayInputStream(raw));
+        HttpRequest first = HttpParser.parse(in, ServerConfig.defaults());
+        assertEquals(HttpMethod.POST, first.method());
+        assertEquals("/up", first.path());
+        assertEquals("abcd", first.bodyText());
+        assertTrue(first.keepAlive());
+
+        HttpRequest second = HttpParser.parse(in, ServerConfig.defaults());
+        assertEquals(HttpMethod.GET, second.method());
+        assertEquals("/next", second.path());
+        assertEquals("1", second.queryParam("x").orElseThrow());
+        assertEquals("127.0.0.1", second.header("host").orElseThrow());
+        assertFalse(second.keepAlive());
+    }
+
+    @Test
+    void bufferedParserAcceptsLowerCaseMethodAndDuplicateHeaders() throws Exception {
+        String raw = "get /a+b HTTP/1.1\r\nHoSt: Example\r\nX-A: one\r\nX-A: two\r\n\r\n";
+        ConnectionInputStream in = new ConnectionInputStream(
+                new java.io.ByteArrayInputStream(raw.getBytes(StandardCharsets.US_ASCII)));
+        HttpRequest req = HttpParser.parse(in, ServerConfig.defaults());
+        assertEquals(HttpMethod.GET, req.method());
+        assertEquals("/a+b", req.path());
+        assertEquals("Example", req.header("host").orElseThrow());
+        assertEquals("one, two", req.header("x-a").orElseThrow());
+    }
+
+    @Test
+    void bufferedParserDecodesPercentEscapes() throws Exception {
+        String raw = "GET /a%2Fb HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        ConnectionInputStream in = new ConnectionInputStream(
+                new java.io.ByteArrayInputStream(raw.getBytes(StandardCharsets.US_ASCII)));
+        HttpRequest req = HttpParser.parse(in, ServerConfig.defaults());
+        assertEquals("/a/b", req.path());
+    }
+
+    @Test
+    void bufferedParserRejectsHeaderLineOverLimit() throws Exception {
+        ServerConfig cfg = ServerConfig.builder().maxHeaderLineBytes(16).build();
+        String raw = "GET / HTTP/1.1\r\nHost: " + "h".repeat(32) + "\r\n\r\n";
+        ConnectionInputStream in = new ConnectionInputStream(
+                new java.io.ByteArrayInputStream(raw.getBytes(StandardCharsets.US_ASCII)));
+        HttpException ex = assertThrows(HttpException.class, () -> HttpParser.parse(in, cfg));
+        assertEquals(400, ex.status());
     }
 }

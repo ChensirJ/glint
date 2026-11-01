@@ -34,6 +34,11 @@ public final class PinningWatcher {
     private PinningWatcher() {
     }
 
+    /** True after {@link #start()} has claimed the watcher. */
+    public static boolean isStarted() {
+        return STARTED.get();
+    }
+
     /** Start the async JFR stream once per JVM. Safe to call repeatedly. */
     public static void start() {
         if (!STARTED.compareAndSet(false, true)) {

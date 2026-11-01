@@ -37,7 +37,25 @@ public final class HttpRequest {
     /** Declared Content-Length, or -1 when chunked / absent. */
     private final long declaredContentLength;
     private final InputStream bodyIn;
-    private final Map<String, String> pathParams = new LinkedHashMap<>();
+    private Map<String, String> pathParams;
+    /** Shared EOF stream for requests with no body. Safe to share: it has no cursor. */
+    static final InputStream EMPTY_BODY = new InputStream() {
+        @Override
+        public int read() {
+            return -1;
+        }
+
+        @Override
+        public int read(byte[] b, int off, int len) {
+            if (b == null) {
+                throw new NullPointerException();
+            }
+            if (off < 0 || len < 0 || off > b.length || len > b.length - off) {
+                throw new IndexOutOfBoundsException();
+            }
+            return len == 0 ? 0 : -1;
+        }
+    };
     private Map<String, String> queryParams;
     private byte[] cachedBody;
     private boolean streamOpened;
@@ -51,7 +69,8 @@ public final class HttpRequest {
         this(method, rawTarget, headers,
                 body == null ? 0L : body.length,
                 null,
-                body == null ? new byte[0] : body);
+                body == null ? new byte[0] : body,
+                false);
     }
 
     /**
@@ -62,11 +81,12 @@ public final class HttpRequest {
      */
     HttpRequest(HttpMethod method, String rawTarget, Map<String, String> headers,
                 long declaredContentLength, InputStream bodyIn) {
-        this(method, rawTarget, headers, declaredContentLength, bodyIn, null);
+        this(method, rawTarget, headers, declaredContentLength, bodyIn, null, true);
     }
 
     private HttpRequest(HttpMethod method, String rawTarget, Map<String, String> headers,
-                        long declaredContentLength, InputStream bodyIn, byte[] cached) {
+                        long declaredContentLength, InputStream bodyIn, byte[] cached,
+                        boolean takeHeaders) {
         this.method = method;
         this.rawPath = rawTarget;
         int q = rawTarget.indexOf('?');
@@ -77,7 +97,12 @@ public final class HttpRequest {
             this.path = decodePath(rawTarget);
             this.query = "";
         }
-        this.headers = Collections.unmodifiableMap(new LinkedHashMap<>(headers));
+        // The parser hands over a fresh map. Public callers may keep mutating theirs.
+        if (takeHeaders) {
+            this.headers = Collections.unmodifiableMap(headers);
+        } else {
+            this.headers = Collections.unmodifiableMap(new LinkedHashMap<>(headers));
+        }
         this.declaredContentLength = declaredContentLength;
         this.cachedBody = cached;
         if (cached != null) {
@@ -85,14 +110,18 @@ public final class HttpRequest {
         } else if (bodyIn != null) {
             this.bodyIn = bodyIn;
         } else {
-            this.bodyIn = InputStream.nullInputStream();
+            this.bodyIn = EMPTY_BODY;
         }
     }
 
     private static String decodePath(String p) {
-        // Keep path decoding conservative: only '+' stays literal in paths.
+        // Paths without escapes are already decoded. '+' stays literal in paths.
+        if (p.indexOf('%') < 0 && p.indexOf('+') < 0) {
+            return p;
+        }
+        String encoded = p.indexOf('+') < 0 ? p : p.replace("+", "%2B");
         try {
-            return URLDecoder.decode(p.replace("+", "%2B"), StandardCharsets.UTF_8);
+            return URLDecoder.decode(encoded, StandardCharsets.UTF_8);
         } catch (Exception e) {
             return p;
         }
@@ -216,7 +245,7 @@ public final class HttpRequest {
      * No-op when the body was fully read or buffered.
      */
     void drainBody() throws IOException {
-        if (cachedBody != null) {
+        if (cachedBody != null || bodyIn == EMPTY_BODY) {
             return;
         }
         if (bodyIn instanceof ContentLengthInputStream cl) {
@@ -254,22 +283,54 @@ public final class HttpRequest {
     }
 
     public boolean keepAlive() {
-        String connection = header("connection").orElse("").toLowerCase(Locale.ROOT);
-        if (connection.contains("close")) {
-            return false;
+        String connection = headers.get("connection");
+        if (connection == null || connection.isEmpty()) {
+            return true;
         }
-        return true;
+        return !containsIgnoreCaseAscii(connection, "close");
+    }
+
+    private static boolean containsIgnoreCaseAscii(String value, String needle) {
+        int n = needle.length();
+        int max = value.length() - n;
+        for (int i = 0; i <= max; i++) {
+            int j = 0;
+            while (j < n) {
+                char a = value.charAt(i + j);
+                char b = needle.charAt(j);
+                if (a >= 'A' && a <= 'Z') {
+                    a += 32;
+                }
+                if (a != b) {
+                    break;
+                }
+                j++;
+            }
+            if (j == n) {
+                return true;
+            }
+        }
+        return false;
     }
 
     public void pathParam(String name, String value) {
+        if (pathParams == null) {
+            pathParams = new LinkedHashMap<>();
+        }
         pathParams.put(name, value);
     }
 
     public String pathParam(String name) {
+        if (pathParams == null) {
+            return null;
+        }
         return pathParams.get(name);
     }
 
     public Map<String, String> pathParams() {
+        if (pathParams == null) {
+            pathParams = new LinkedHashMap<>();
+        }
         return Collections.unmodifiableMap(pathParams);
     }
 

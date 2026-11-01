@@ -35,6 +35,12 @@ public final class ObsExporters {
         return List.copyOf(EXPORTERS);
     }
 
+    /** True when an exporter is registered. Loads the SPI once. */
+    public static boolean hasAny() {
+        ensureLoaded();
+        return !EXPORTERS.isEmpty();
+    }
+
     public static void emitMetrics(Map<String, Object> snapshot) {
         ensureLoaded();
         for (ObsExporter e : EXPORTERS) {

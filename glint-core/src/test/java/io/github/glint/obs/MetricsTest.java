@@ -33,4 +33,24 @@ class MetricsTest {
         assertEquals(100L, x.get("count"));
         assertTrue(((Number) x.get("p50Ms")).doubleValue() >= 0);
     }
+
+    @Test
+    void recordFromSeveralThreadsKeepsTheCount() throws Exception {
+        Metrics m = new Metrics();
+        int threads = 8;
+        int each = 1000;
+        Thread[] workers = new Thread[threads];
+        for (int i = 0; i < threads; i++) {
+            workers[i] = new Thread(() -> {
+                for (int n = 0; n < each; n++) {
+                    m.record("/x", 2_000_000L);
+                }
+            });
+            workers[i].start();
+        }
+        for (Thread worker : workers) {
+            worker.join();
+        }
+        assertEquals((long) threads * each, m.totalRequests());
+    }
 }

@@ -7,6 +7,7 @@ import java.net.Socket;
 import java.nio.ByteBuffer;
 import java.nio.channels.ReadableByteChannel;
 import java.nio.channels.SocketChannel;
+import java.util.Arrays;
 
 /**
  * Connection-private request input.
@@ -53,6 +54,8 @@ final class ConnectionInputStream extends InputStream {
     private int count;
     private boolean large;
     private boolean closed;
+    /** Reused line scratch for the header parser. Not the socket buffer. */
+    private byte[] lineBuf = new byte[160];
 
     ConnectionInputStream(Socket socket) throws IOException {
         SocketChannel ch = socket.getChannel();
@@ -90,6 +93,57 @@ final class ConnectionInputStream extends InputStream {
     void expectLargeBody() throws IOException {
         ensureOpen();
         large = true;
+    }
+
+    /**
+     * Read one header line into {@link #headerLineBuffer()} without copying
+     * through a {@code StringBuilder}. The CRLF is stripped. Bytes past the
+     * line stay in the socket buffer for the body or the next keep-alive request.
+     *
+     * @return line length, or {@code -1} when the peer closed before any byte
+     */
+    int readHeaderLine(int maxLen) throws IOException {
+        ensureOpen();
+        int len = 0;
+        boolean any = false;
+        while (true) {
+            if (pos >= count) {
+                int n = fillHeap();
+                if (n <= 0) {
+                    if (!any) {
+                        return -1;
+                    }
+                    return len;
+                }
+            }
+            int c = buf[pos++] & 0xff;
+            any = true;
+            if (c == '\n') {
+                if (len > 0 && lineBuf[len - 1] == '\r') {
+                    len--;
+                }
+                return len;
+            }
+            if (len == lineBuf.length) {
+                int cap = lineBuf.length * 2;
+                if (cap > maxLen + 1) {
+                    cap = maxLen + 1;
+                }
+                if (cap <= lineBuf.length) {
+                    throw new HttpException(400, "Header line too long");
+                }
+                lineBuf = Arrays.copyOf(lineBuf, cap);
+            }
+            lineBuf[len++] = (byte) c;
+            if (len > maxLen) {
+                throw new HttpException(400, "Header line too long");
+            }
+        }
+    }
+
+    /** Valid until the next {@link #readHeaderLine(int)}. */
+    byte[] headerLineBuffer() {
+        return lineBuf;
     }
 
     @Override
@@ -207,6 +261,7 @@ final class ConnectionInputStream extends InputStream {
         closed = true;
         buf = null;
         heapView = null;
+        lineBuf = null;
         if (raw != null) {
             raw.close();
         }
