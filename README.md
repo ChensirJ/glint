@@ -356,16 +356,16 @@ Platform threads, virtual threads not counted: Glint stays at 33-48 across the s
 
 ### `/hello` and static files (in-process microbench, 64 clients, warmup 2s + 5s)
 
-`/hello` was re-measured **2026-11-01 06:09 UTC** on Linux 6.12 x86_64 (4 logical cores, Intel Xeon, 15.6 GiB RAM, OpenJDK 21.0.12, `-Xms256m -Xmx1g -XX:+UseG1GC`). Java `HttpClient` HTTP/1.1 in the same JVM as the server. Three runs; the table uses the median Glint run. Static rows stay the **2026-11-01 08:56:00** Windows capture (AMD Ryzen 7 7840HS, 16 logical cores) and were not re-run. These rows are Glint vs platform Tomcat only; the microbench does not start Tomcat-VT.
+`/hello` was re-measured **2026-11-01 14:14 CST** on the Windows bench host after #14 landed on main (AMD Ryzen 7 7840HS, 16 logical cores, 31.2 GiB RAM, Windows 11, OpenJDK 21.0.8). `ComparisonBench 2 5 64` (warmup 2s, measure 5s, c=64, path `/hello` body `ok`), 3 runs, 0 errors in every run. The table is each server's median run by req/s. Static rows stay the **2026-11-01 08:56:00 CST** capture on that same host and were not re-run. These rows are Glint vs platform Tomcat only; the microbench does not start Tomcat-VT.
 
 | Case | Glint req/s | Tomcat req/s | Glint p99 ms | Tomcat p99 ms |
 |------|------------:|-------------:|-------------:|--------------:|
-| `/hello` text | 65,063 | 58,099 | 2.97 | 3.81 |
+| `/hello` text | 95,936 | 94,032 | 1.81 | 1.49 |
 | Static 1 KiB | 97,073 | 23,775 | 2.28 | 5.06 |
 | Static 100 KiB | 14,760 | 10,714 | 6.31 | 12.94 |
 | Static 2 MiB | 563 | 575 | 152.70 | 142.79 |
 
-On this Linux host Glint leads `/hello` (65,063 vs 58,099). The three-run range was Glint 62,962-65,214 and Tomcat 57,513-59,078. Before the keep-alive allocation cut, the same harness on this host was Glint median 61,306 vs Tomcat 58,264. An earlier Windows `/hello` cell (Glint 93,216 vs Tomcat 104,884) is a different machine and was not re-run. Static 2 MiB on that Windows capture is a near tie (575 vs 563). Static 1 KiB and 100 KiB favor Glint. Glint caches the resolved path, siblings, and precomputed ETag / Last-Modified strings per mount for `revalidateMillis` (default 1000 ms) and writes a small header plus body in one gathering write.
+On this host the two are now roughly at parity, with Glint slightly ahead on the median (95,936 vs 94,032; range 92,962-102,651 vs 90,181-97,183) and Tomcat ahead in one of three runs. Before #14, a single run at 2026-11-01 08:55:58 CST was Glint 93,216 req/s vs Tomcat embed 104,884. A different host, Linux 6.12 x86_64 with 4 logical cores (Intel Xeon, 15.6 GiB RAM, OpenJDK 21.0.12, `-Xms256m -Xmx1g -XX:+UseG1GC`), measured the same harness at 2026-11-01 06:09 UTC: Glint median 65,063 (range 62,962-65,214, p99 2.97 ms) vs Tomcat 58,099 (range 57,513-59,078, p99 3.81 ms). Before the keep-alive allocation cut on that Linux host, the median was Glint 61,306 vs Tomcat 58,264. Static 2 MiB on the Windows capture is a near tie (575 vs 563). Static 1 KiB and 100 KiB favor Glint. Glint caches the resolved path, siblings, and precomputed ETag / Last-Modified strings per mount for `revalidateMillis` (default 1000 ms) and writes a small header plus body in one gathering write.
 
 ## OpenTelemetry
 

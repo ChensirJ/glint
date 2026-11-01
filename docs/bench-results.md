@@ -1,12 +1,35 @@
 # Glint vs Tomcat microbench
 
+- Captured: **2026-11-01 14:14 CST**, after #14 landed on main
+- Host: Windows bench host, AMD Ryzen 7 7840HS, 16 logical cores, 31.2 GiB RAM, Windows 11, OpenJDK 21.0.8 (same machine as the static-file and realistic sections)
+- Method: `ComparisonBench 2 5 64` (Java `HttpClient` HTTP/1.1 virtual-thread workers, same JVM as the server, warmup 2s + measure 5s, concurrency 64, path `/hello` body `ok`), 3 runs, 0 errors in every run
+- Glint: in-process `Glint.create(0)` / Tomcat: `tomcat-embed-core` 10.1.24 ephemeral port
+- Each row is that server's median run by req/s, plus the min-max req/s across the three runs. Glint's median is the second run. Tomcat's median is the third run.
+- Re-run: `powershell -ExecutionPolicy Bypass -File scripts/run-bench.ps1`
+
+| Server | req/s (median) | req/s min-max | errors | p50 (ms) | p99 (ms) | max (ms) |
+|--------|---------------:|--------------:|-------:|---------:|---------:|---------:|
+| Glint | 95936 | 92962-102651 | 0 | 0.61 | 1.81 | 5.26 |
+| Tomcat embed | 94032 | 90181-97183 | 0 | 0.63 | 1.49 | 20.44 |
+
+Three runs, in order: Glint 92,962 / 95,936 / 102,651 req/s (p50 0.65 / 0.61 / 0.58 ms, p99 1.63 / 1.81 / 1.52 ms, max 4.71 / 5.26 / 5.78 ms); Tomcat embed 90,181 / 97,183 / 94,032 (p50 0.66 / 0.62 / 0.63 ms, p99 1.66 / 1.40 / 1.49 ms, max 9.89 / 9.78 / 20.44 ms).
+
+On this host the two are now roughly at parity, with Glint slightly ahead on the median (95,936 vs 94,032) and Tomcat ahead in one of three runs (second run: 97,183 vs 95,936).
+
+Before #14, a single run at 2026-11-01 08:55:58 CST on this host was Glint 93,216 req/s vs Tomcat embed 104,884.
+
+Numbers are machine-local and not a guarantee of production ranking.
+
+### Different host: Linux 4-core
+
+These `/hello` rows are from a different machine than the Windows bench host above.
+
 - Captured: **2026-11-01 06:09 UTC**
 - Host: Linux 6.12 x86_64, 4 logical cores (Intel Xeon), 15.6 GiB RAM, OpenJDK 21.0.12
 - Method: Java `HttpClient` (HTTP/1.1) virtual-thread workers, same JVM as the server, warmup 2s + measure 5s, concurrency 64, path `/hello` body `ok`
 - JVM flags: `-Xms256m -Xmx1g -XX:+UseG1GC`
 - Glint: in-process `Glint.create(0)` / Tomcat: `tomcat-embed-core` 10.1.24 ephemeral port
 - Re-run: `powershell -ExecutionPolicy Bypass -File scripts/run-bench.ps1` (the row below is the median of three `ComparisonBench 2 5 64` runs on this host, chosen by Glint req/s)
-- Earlier Windows cell, not re-run here: 2026-11-01 08:55:58 on an AMD Ryzen 7 7840HS (16 logical cores), Glint 93,216 req/s vs Tomcat embed 104,884
 
 | Server | req/s | errors | p50 (ms) | p99 (ms) | max (ms) |
 |--------|------:|-------:|---------:|---------:|---------:|
@@ -23,7 +46,7 @@ Numbers are machine-local and not a guarantee of production ranking.
 
 ## Static files (Glint vs Tomcat DefaultServlet)
 
-- Captured: **2026-11-01 08:56:00** on the earlier Windows bench host (AMD Ryzen 7 7840HS, 16 logical cores). Not re-run with the `/hello` allocation cut.
+- Captured: **2026-11-01 08:56:00 CST** on the same Windows bench host (AMD Ryzen 7 7840HS, 16 logical cores). Not re-run with the `/hello` allocation cut.
 - Method: Java `HttpClient` (HTTP/1.1) virtual-thread workers, warmup 2s + measure 5s, concurrency 64
 - Glint: `staticFiles` with default StaticOptions (small-file cache + zero-copy for large files)
 - Tomcat: embed 10.1.24.0 `DefaultServlet` / `initWebappDefaults`, docBase = temp dir
