@@ -60,14 +60,14 @@ public final class Router {
         // Exact method match first.
         for (Route route : routes) {
             if (route.matches(request)) {
-                return Match.found(route.handler());
+                return route.found();
             }
         }
         // HEAD → GET fallback.
         if (request.method() == HttpMethod.HEAD) {
             for (Route route : routes) {
                 if (route.method() == HttpMethod.GET && route.matchesPath(request)) {
-                    return Match.found(route.handler());
+                    return route.found();
                 }
             }
         }

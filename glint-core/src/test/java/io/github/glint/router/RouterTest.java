@@ -48,6 +48,16 @@ class RouterTest {
     }
 
     @Test
+    void literalRouteDoesNotTreatDotAsRegex() {
+        Router router = new Router();
+        router.add(HttpMethod.GET, "/file.txt", (req, resp) -> {});
+        HttpRequest hit = new HttpRequest(HttpMethod.GET, "/file.txt", Map.of(), new byte[0]);
+        HttpRequest miss = new HttpRequest(HttpMethod.GET, "/fileXtxt", Map.of(), new byte[0]);
+        assertNotNull(router.match(hit));
+        assertNull(router.match(miss));
+    }
+
+    @Test
     void returnsNullWhenNoMatch() {
         Router router = new Router();
         router.add(HttpMethod.GET, "/a", (req, resp) -> {});

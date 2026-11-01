@@ -6,7 +6,6 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
-import java.nio.channels.GatheringByteChannel;
 import java.nio.channels.WritableByteChannel;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
@@ -42,12 +41,23 @@ import io.github.glint.obs.Trace;
  */
 public final class HttpResponse {
 
+    private static final byte[] EMPTY_BODY = new byte[0];
+    /** Small bodies are copied behind the headers so one write sends both. */
+    private static final int MAX_INLINE_BODY = 8192;
+    private static final String[] SMALL_LENGTHS = new String[513];
+
+    static {
+        for (int i = 0; i < SMALL_LENGTHS.length; i++) {
+            SMALL_LENGTHS[i] = Integer.toString(i);
+        }
+    }
+
     private final OutputStream out;
     private int status = 200;
     private final Map<String, String> headers = new LinkedHashMap<>();
     /** Ordered list of Set-Cookie header values (one wire header per entry). */
     private final List<String> setCookies = new ArrayList<>();
-    private byte[] body = new byte[0];
+    private byte[] body = EMPTY_BODY;
     private boolean committed;
     private boolean suppressBody;
     /** Socket channel for zero-copy sends, or null when only the stream may be used. */
@@ -61,6 +71,12 @@ public final class HttpResponse {
     private boolean closeConnection;
     /** Body bytes written after headers (streamed or finished). */
     private long bytesWritten;
+    /** Reused header bytes for this connection. Grown on demand, never shrunk. */
+    private byte[] scratch = new byte[256];
+    private ByteBuffer scratchView = ByteBuffer.wrap(scratch);
+    /** Last UTF-8 text encoded on this connection (identity match, not a content hash). */
+    private String cachedUtf8Text;
+    private byte[] cachedUtf8Bytes;
 
     public HttpResponse(OutputStream out) {
         this(out, null);
@@ -81,6 +97,27 @@ public final class HttpResponse {
         }
         this.channel = channel;
         headers.put("Server", "Glint/0.1");
+    }
+
+    /**
+     * Clear handler-visible state so the same object can serve the next
+     * keep-alive request on this connection. The header scratch and the
+     * UTF-8 text cache stay.
+     */
+    void recycle() {
+        status = 200;
+        headers.clear();
+        headers.put("Server", "Glint/0.1");
+        setCookies.clear();
+        body = EMPTY_BODY;
+        committed = false;
+        suppressBody = false;
+        filePath = null;
+        fileOffset = 0;
+        fileLength = 0;
+        streaming = false;
+        closeConnection = false;
+        bytesWritten = 0;
     }
 
     public HttpResponse status(int code) {
@@ -188,28 +225,49 @@ public final class HttpResponse {
     }
 
     public HttpResponse text(String body, Charset charset) {
-        this.body = body.getBytes(charset);
+        if (StandardCharsets.UTF_8.equals(charset)) {
+            this.body = cachedUtf8(body);
+        } else {
+            this.body = body.getBytes(charset);
+        }
         this.filePath = null;
         headers.putIfAbsent("Content-Type", "text/plain; charset=" + charset.name().toLowerCase(Locale.ROOT));
         return this;
     }
 
     public HttpResponse json(String body) {
-        this.body = body.getBytes(StandardCharsets.UTF_8);
+        this.body = cachedUtf8(body);
         this.filePath = null;
         headers.putIfAbsent("Content-Type", "application/json; charset=utf-8");
         return this;
     }
 
     public HttpResponse html(String body) {
-        this.body = body.getBytes(StandardCharsets.UTF_8);
+        this.body = cachedUtf8(body);
         this.filePath = null;
         headers.putIfAbsent("Content-Type", "text/html; charset=utf-8");
         return this;
     }
 
+    /**
+     * Repeated identical strings (a constant JSON payload on a keep-alive
+     * connection) reuse the previous encoding. The returned array is the
+     * response body; callers must not mutate it.
+     */
+    private byte[] cachedUtf8(String text) {
+        if (text == cachedUtf8Text) {
+            return cachedUtf8Bytes;
+        }
+        byte[] encoded = text.getBytes(StandardCharsets.UTF_8);
+        if (text.length() <= 4096) {
+            cachedUtf8Text = text;
+            cachedUtf8Bytes = encoded;
+        }
+        return encoded;
+    }
+
     public HttpResponse bytes(byte[] data, String contentType) {
-        this.body = data == null ? new byte[0] : data;
+        this.body = data == null ? EMPTY_BODY : data;
         if (contentType != null) {
         this.filePath = null;
             headers.put("Content-Type", contentType);
@@ -219,7 +277,7 @@ public final class HttpResponse {
 
     /** Convenience empty body with status (e.g. 204). */
     public HttpResponse empty() {
-        this.body = new byte[0];
+        this.body = EMPTY_BODY;
         this.filePath = null;
         return this;
     }
@@ -232,7 +290,7 @@ public final class HttpResponse {
         if (file == null || offset < 0 || length < 0) {
             throw new IllegalArgumentException("invalid file region");
         }
-        this.body = new byte[0];
+        this.body = EMPTY_BODY;
         this.filePath = file;
         this.fileOffset = offset;
         this.fileLength = length;
@@ -259,7 +317,7 @@ public final class HttpResponse {
 
     /** Replace the buffered body (used by compression middleware). */
     public HttpResponse body(byte[] data) {
-        this.body = data == null ? new byte[0] : data;
+        this.body = data == null ? EMPTY_BODY : data;
         this.filePath = null;
         return this;
     }
@@ -400,7 +458,7 @@ public final class HttpResponse {
         }
         this.status = 200;
         this.filePath = null;
-        this.body = new byte[0];
+        this.body = EMPTY_BODY;
         headers.put("Content-Type", "text/event-stream; charset=utf-8");
         headers.putIfAbsent("Cache-Control", "no-cache");
         headers.put("Connection", "close");
@@ -465,27 +523,13 @@ public final class HttpResponse {
     }
 
     private void writeHeadersWithoutLength() throws IOException {
-        StringBuilder sb = new StringBuilder(256);
-        sb.append("HTTP/1.1 ").append(status).append(' ').append(reason(status)).append("\r\n");
-        for (Map.Entry<String, String> e : headers.entrySet()) {
-            if (isSetCookie(e.getKey())) {
-                continue;
-            }
-            if ("content-length".equalsIgnoreCase(e.getKey())) {
-                continue;
-            }
-            sb.append(e.getKey()).append(": ").append(e.getValue()).append("\r\n");
-        }
-        for (String c : setCookies) {
-            sb.append("Set-Cookie: ").append(c).append("\r\n");
-        }
-        sb.append("\r\n");
-        byte[] headerBytes = sb.toString().getBytes(StandardCharsets.US_ASCII);
+        int n = encodeHeaders(true);
         // Streamed responses always use the OutputStream path so we never mix
         // BufferedOutputStream writes with SocketChannel on the same socket.
-        out.write(headerBytes);
+        out.write(scratch, 0, n);
         out.flush();
     }
+
     public void finish() throws IOException {
         finish(null);
     }
@@ -504,41 +548,31 @@ public final class HttpResponse {
         committed = true;
         boolean head = suppressBody || method == HttpMethod.HEAD;
         long contentLength = filePath != null ? fileLength : body.length;
-        headers.put("Content-Length", Long.toString(contentLength));
+        headers.put("Content-Length", lengthString(contentLength));
         if (!head) {
             bytesWritten = contentLength;
         }
         headers.putIfAbsent("Connection", "keep-alive");
 
-        StringBuilder sb = new StringBuilder(256);
-        sb.append("HTTP/1.1 ").append(status).append(' ').append(reason(status)).append("\r\n");
-        for (Map.Entry<String, String> e : headers.entrySet()) {
-            // Never write Set-Cookie from the map; cookies go through setCookies.
-            if (isSetCookie(e.getKey())) {
-                continue;
-            }
-            sb.append(e.getKey()).append(": ").append(e.getValue()).append("\r\n");
-        }
-        for (String c : setCookies) {
-            sb.append("Set-Cookie: ").append(c).append("\r\n");
-        }
-        sb.append("\r\n");
-        byte[] headerBytes = sb.toString().getBytes(StandardCharsets.US_ASCII);
+        int n = encodeHeaders(false);
         // When a SocketChannel is available, send the whole response through it.
         // Mixing BufferedOutputStream and SocketChannel on the same Windows socket
         // can stall keep-alive clients; see writeFileRegion().
         if (channel != null) {
-            if (!head && filePath == null && body.length > 0) {
-                // Header + body in one gathering write: one syscall, one TCP segment for small bodies.
-                writeFully(channel, ByteBuffer.wrap(headerBytes), ByteBuffer.wrap(body));
+            if (!head && filePath == null && body.length > 0 && body.length <= MAX_INLINE_BODY) {
+                ensureScratch(n + body.length);
+                System.arraycopy(body, 0, scratch, n, body.length);
+                writeScratch(n + body.length);
             } else {
-                writeFully(channel, ByteBuffer.wrap(headerBytes));
+                writeScratch(n);
                 if (!head && filePath != null) {
                     writeFileRegion();
+                } else if (!head && body.length > 0) {
+                    writeFully(channel, ByteBuffer.wrap(body));
                 }
             }
         } else {
-            out.write(headerBytes);
+            out.write(scratch, 0, n);
             if (!head && filePath != null) {
                 writeFileRegion();
             } else if (!head && body.length > 0) {
@@ -548,21 +582,112 @@ public final class HttpResponse {
         }
     }
 
-    private static void writeFully(WritableByteChannel ch, ByteBuffer buf) throws IOException {
-        while (buf.hasRemaining()) {
-            ch.write(buf);
+    private static String lengthString(long n) {
+        if (n >= 0 && n < SMALL_LENGTHS.length) {
+            return SMALL_LENGTHS[(int) n];
+        }
+        return Long.toString(n);
+    }
+
+    /** Encode the status line and headers into {@link #scratch}. Returns the byte count. */
+    private int encodeHeaders(boolean skipContentLength) {
+        int n = 0;
+        n = appendAscii(n, "HTTP/1.1 ");
+        n = appendInt(n, status);
+        n = appendAscii(n, " ");
+        n = appendAscii(n, reason(status));
+        n = appendCrLf(n);
+        for (Map.Entry<String, String> e : headers.entrySet()) {
+            if (isSetCookie(e.getKey())) {
+                continue;
+            }
+            if (skipContentLength && "content-length".equalsIgnoreCase(e.getKey())) {
+                continue;
+            }
+            n = appendAscii(n, e.getKey());
+            n = appendAscii(n, ": ");
+            String value = e.getValue();
+            if (value != null && !value.isEmpty()) {
+                n = appendAscii(n, value);
+            }
+            n = appendCrLf(n);
+        }
+        for (String c : setCookies) {
+            n = appendAscii(n, "Set-Cookie: ");
+            n = appendAscii(n, c);
+            n = appendCrLf(n);
+        }
+        return appendCrLf(n);
+    }
+
+    private int appendAscii(int n, String s) {
+        int len = s.length();
+        ensureScratch(n + len);
+        for (int i = 0; i < len; i++) {
+            char c = s.charAt(i);
+            scratch[n++] = c <= 0x7F ? (byte) c : (byte) '?';
+        }
+        return n;
+    }
+
+    private int appendCrLf(int n) {
+        ensureScratch(n + 2);
+        scratch[n++] = '\r';
+        scratch[n++] = '\n';
+        return n;
+    }
+
+    private int appendInt(int n, int value) {
+        if (value < 0) {
+            ensureScratch(n + 1);
+            scratch[n++] = '-';
+            value = -value;
+        }
+        if (value == 0) {
+            ensureScratch(n + 1);
+            scratch[n++] = '0';
+            return n;
+        }
+        int start = n;
+        while (value > 0) {
+            ensureScratch(n + 1);
+            scratch[n++] = (byte) ('0' + (value % 10));
+            value /= 10;
+        }
+        for (int i = start, j = n - 1; i < j; i++, j--) {
+            byte tmp = scratch[i];
+            scratch[i] = scratch[j];
+            scratch[j] = tmp;
+        }
+        return n;
+    }
+
+    private void ensureScratch(int need) {
+        if (scratch.length >= need) {
+            return;
+        }
+        int cap = scratch.length;
+        while (cap < need) {
+            cap *= 2;
+        }
+        byte[] bigger = new byte[cap];
+        System.arraycopy(scratch, 0, bigger, 0, scratch.length);
+        scratch = bigger;
+        scratchView = ByteBuffer.wrap(scratch);
+    }
+
+    private void writeScratch(int len) throws IOException {
+        ByteBuffer view = scratchView;
+        view.position(0);
+        view.limit(len);
+        while (view.hasRemaining()) {
+            channel.write(view);
         }
     }
 
-    private static void writeFully(WritableByteChannel ch, ByteBuffer a, ByteBuffer b) throws IOException {
-        if (ch instanceof GatheringByteChannel g) {
-            ByteBuffer[] bufs = {a, b};
-            while (b.hasRemaining()) {
-                g.write(bufs);
-            }
-        } else {
-            writeFully(ch, a);
-            writeFully(ch, b);
+    private static void writeFully(WritableByteChannel ch, ByteBuffer buf) throws IOException {
+        while (buf.hasRemaining()) {
+            ch.write(buf);
         }
     }
 

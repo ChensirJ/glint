@@ -4,12 +4,11 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.LongAdder;
-import java.util.concurrent.locks.ReentrantLock;
 
 /**
- * Lock-friendly latency metrics.
- * Counts use {@link LongAdder}; latency histograms use {@link ReentrantLock}
- * instead of {@code synchronized} to avoid pinning virtual threads on JDK 21.
+ * Lock-free latency metrics.
+ * Counts and histogram buckets use {@link LongAdder}, so {@link #record(String, long)}
+ * does not take a lock and does not pin virtual threads on JDK 21.
  *
  * <p>{@link #snapshot()} is intentionally plain Maps/Numbers so it can be
  * serialized to JSON or fed into an OpenTelemetry exporter without deps in core.
@@ -32,8 +31,14 @@ public final class Metrics {
 
     public void record(String path, long durNs) {
         totalRequests.increment();
-        counts.computeIfAbsent(path, k -> new LongAdder()).increment();
-        latency.computeIfAbsent(path, k -> new Histogram()).add(durNs);
+        LongAdder count = counts.get(path);
+        Histogram hist = latency.get(path);
+        if (count == null || hist == null) {
+            count = counts.computeIfAbsent(path, k -> new LongAdder());
+            hist = latency.computeIfAbsent(path, k -> new Histogram());
+        }
+        count.increment();
+        hist.add(durNs);
     }
 
     public void recordPinning() {
@@ -155,49 +160,40 @@ public final class Metrics {
 
     /** Power-of-two latency buckets for approximate percentiles. */
     public static final class Histogram {
-        private final ReentrantLock lock = new ReentrantLock();
-        private final long[] buckets = new long[64];
-        private long total;
+        private final LongAdder[] buckets = new LongAdder[64];
+        private final LongAdder total = new LongAdder();
+
+        public Histogram() {
+            for (int i = 0; i < buckets.length; i++) {
+                buckets[i] = new LongAdder();
+            }
+        }
 
         public void add(long ns) {
             int i = Math.min(63, 63 - Long.numberOfLeadingZeros(Math.max(1L, ns)));
-            lock.lock();
-            try {
-                buckets[i]++;
-                total++;
-            } finally {
-                lock.unlock();
-            }
+            buckets[i].increment();
+            total.increment();
         }
 
         public double percentileMs(double p) {
-            lock.lock();
-            try {
-                if (total == 0) {
-                    return 0.0;
-                }
-                long target = Math.max(1L, (long) Math.ceil(total * p));
-                long acc = 0;
-                for (int i = 0; i < buckets.length; i++) {
-                    acc += buckets[i];
-                    if (acc >= target) {
-                        long midNs = 1L << Math.min(62, i);
-                        return midNs / 1_000_000.0;
-                    }
-                }
-                return (1L << 62) / 1_000_000.0;
-            } finally {
-                lock.unlock();
+            long seen = total.sum();
+            if (seen == 0) {
+                return 0.0;
             }
+            long target = Math.max(1L, (long) Math.ceil(seen * p));
+            long acc = 0;
+            for (int i = 0; i < buckets.length; i++) {
+                acc += buckets[i].sum();
+                if (acc >= target) {
+                    long midNs = 1L << Math.min(62, i);
+                    return midNs / 1_000_000.0;
+                }
+            }
+            return (1L << 62) / 1_000_000.0;
         }
 
         public long total() {
-            lock.lock();
-            try {
-                return total;
-            } finally {
-                lock.unlock();
-            }
+            return total.sum();
         }
     }
 }

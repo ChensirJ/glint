@@ -22,7 +22,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.LongAdder;
 
 /**
  * Virtual-thread native HTTP/1.1 server.
@@ -44,7 +44,7 @@ public final class VtServer implements AutoCloseable {
     private final ServerConfig config;
     private final WebSocketSupport.Registry webSockets;
     private final AtomicBoolean running = new AtomicBoolean(true);
-    private final AtomicInteger inFlight = new AtomicInteger(0);
+    private final LongAdder inFlight = new LongAdder();
     private final Set<Socket> openSockets = ConcurrentHashMap.newKeySet();
     private Thread acceptor;
     private volatile boolean timerAcquired;
@@ -132,6 +132,9 @@ public final class VtServer implements AutoCloseable {
                 socket.setSoTimeout(config.idleTimeoutMs());
             }
             boolean uploadTuned = false;
+            WritableByteChannel channel = zeroCopyChannel(socket);
+            String remote = clientAddress(socket);
+            HttpResponse resp = new HttpResponse(out, channel);
             while (running.get()) {
                 final HttpRequest req;
                 try {
@@ -147,7 +150,7 @@ public final class VtServer implements AutoCloseable {
                 if (req == null) {
                     return;
                 }
-                req.remoteAddress(clientAddress(socket));
+                req.remoteAddress(remote);
                 // Large uploads: widen the TCP window so the body can sit in the
                 // socket, then let the handler read straight into its own array.
                 // Done after the header parse so small requests keep the default
@@ -170,11 +173,11 @@ public final class VtServer implements AutoCloseable {
                     return;
                 }
 
-                HttpResponse resp = new HttpResponse(out, zeroCopyChannel(socket));
+                resp.recycle();
                 if (req.method() == HttpMethod.HEAD) {
                     resp.suppressBody(true);
                 }
-                inFlight.incrementAndGet();
+                inFlight.increment();
                 Trace.noteActive(+1);
                 try {
                     Trace.run(req, () -> handler.handle(req, resp));
@@ -188,7 +191,7 @@ public final class VtServer implements AutoCloseable {
                     }
                     ex.printStackTrace();
                 } finally {
-                    inFlight.decrementAndGet();
+                    inFlight.decrement();
                     Trace.noteActive(-1);
                 }
                 try {
@@ -268,7 +271,7 @@ public final class VtServer implements AutoCloseable {
     }
 
     public int inFlight() {
-        return inFlight.get();
+        return (int) inFlight.sum();
     }
 
     public ServerConfig config() {
@@ -298,7 +301,7 @@ public final class VtServer implements AutoCloseable {
 
         long waitMs = Math.min(config.shutdownWaitMs(), 2_000L);
         long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(waitMs);
-        while (inFlight.get() > 0 && System.nanoTime() < deadline) {
+        while (inFlight.sum() > 0 && System.nanoTime() < deadline) {
             try {
                 Thread.sleep(10);
             } catch (InterruptedException e) {
