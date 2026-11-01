@@ -10,11 +10,10 @@ import java.nio.channels.WritableByteChannel;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.zip.GZIPOutputStream;
@@ -45,6 +44,15 @@ public final class HttpResponse {
     /** Small bodies are copied behind the headers so one write sends both. */
     private static final int MAX_INLINE_BODY = 8192;
     private static final String[] SMALL_LENGTHS = new String[513];
+    private static final String TEXT_PLAIN_UTF8 = "text/plain; charset=utf-8";
+    private static final String TEXT_HTML_UTF8 = "text/html; charset=utf-8";
+    private static final String JSON_UTF8 = "application/json; charset=utf-8";
+    private static final String EVENT_STREAM_UTF8 = "text/event-stream; charset=utf-8";
+    private static final String SERVER_NAME = "Server";
+    private static final String SERVER_VALUE = "Glint/0.1";
+    private static final String CONNECTION = "Connection";
+    private static final String KEEP_ALIVE = "keep-alive";
+    private static final String CLOSE = "close";
 
     static {
         for (int i = 0; i < SMALL_LENGTHS.length; i++) {
@@ -54,7 +62,7 @@ public final class HttpResponse {
 
     private final OutputStream out;
     private int status = 200;
-    private final Map<String, String> headers = new LinkedHashMap<>();
+    private final HeaderTable headers = new HeaderTable();
     /** Ordered list of Set-Cookie header values (one wire header per entry). */
     private final List<String> setCookies = new ArrayList<>();
     private byte[] body = EMPTY_BODY;
@@ -77,6 +85,22 @@ public final class HttpResponse {
     /** Last UTF-8 text encoded on this connection (identity match, not a content hash). */
     private String cachedUtf8Text;
     private byte[] cachedUtf8Bytes;
+    /**
+     * Last fully buffered status line + headers + small body. A keep-alive
+     * handler that writes the same response skips header encoding.
+     */
+    private byte[] wire;
+    private int wireLen;
+    private ByteBuffer wireView;
+    private boolean wireValid;
+    private int wireStatus;
+    private boolean wireOmitBody;
+    private byte[] wireBody;
+    private int wireHeaderSize;
+    private String[] wireNames = new String[8];
+    private String[] wireValues = new String[8];
+    private int wireCookieSize;
+    private String[] wireCookies = new String[4];
 
     public HttpResponse(OutputStream out) {
         this(out, null);
@@ -96,7 +120,7 @@ public final class HttpResponse {
             this.out = new BufferedOutputStream(out);
         }
         this.channel = channel;
-        headers.put("Server", "Glint/0.1");
+        headers.resetDefault();
     }
 
     /**
@@ -106,8 +130,7 @@ public final class HttpResponse {
      */
     void recycle() {
         status = 200;
-        headers.clear();
-        headers.put("Server", "Glint/0.1");
+        headers.resetDefault();
         setCookies.clear();
         body = EMPTY_BODY;
         committed = false;
@@ -231,22 +254,30 @@ public final class HttpResponse {
             this.body = body.getBytes(charset);
         }
         this.filePath = null;
-        headers.putIfAbsent("Content-Type", "text/plain; charset=" + charset.name().toLowerCase(Locale.ROOT));
+        headers.putIfAbsent("Content-Type", textPlainType(charset));
         return this;
     }
 
     public HttpResponse json(String body) {
         this.body = cachedUtf8(body);
         this.filePath = null;
-        headers.putIfAbsent("Content-Type", "application/json; charset=utf-8");
+        headers.putIfAbsent("Content-Type", JSON_UTF8);
         return this;
     }
 
     public HttpResponse html(String body) {
         this.body = cachedUtf8(body);
         this.filePath = null;
-        headers.putIfAbsent("Content-Type", "text/html; charset=utf-8");
+        headers.putIfAbsent("Content-Type", TEXT_HTML_UTF8);
         return this;
+    }
+
+    /** UTF-8 is the keep-alive case: one shared content-type string, no toLowerCase. */
+    private String textPlainType(Charset charset) {
+        if (StandardCharsets.UTF_8.equals(charset)) {
+            return TEXT_PLAIN_UTF8;
+        }
+        return "text/plain; charset=" + charset.name().toLowerCase(Locale.ROOT);
     }
 
     /**
@@ -384,12 +415,7 @@ public final class HttpResponse {
     }
 
     private String headerValue(String name) {
-        for (Map.Entry<String, String> e : headers.entrySet()) {
-            if (e.getKey().equalsIgnoreCase(name)) {
-                return e.getValue();
-            }
-        }
-        return null;
+        return headers.getIgnoreCase(name);
     }
 
     static boolean acceptsGzip(String acceptEncoding) {
@@ -459,9 +485,9 @@ public final class HttpResponse {
         this.status = 200;
         this.filePath = null;
         this.body = EMPTY_BODY;
-        headers.put("Content-Type", "text/event-stream; charset=utf-8");
+        headers.put("Content-Type", EVENT_STREAM_UTF8);
         headers.putIfAbsent("Cache-Control", "no-cache");
-        headers.put("Connection", "close");
+        headers.put(CONNECTION, CLOSE);
         headers.remove("Content-Length");
         writeHeadersWithoutLength();
         committed = true;
@@ -552,17 +578,24 @@ public final class HttpResponse {
         if (!head) {
             bytesWritten = contentLength;
         }
-        headers.putIfAbsent("Connection", "keep-alive");
+        headers.putIfAbsent(CONNECTION, KEEP_ALIVE);
+
+        if (sameWire(head)) {
+            writeWire();
+            return;
+        }
 
         int n = encodeHeaders(false);
         // When a SocketChannel is available, send the whole response through it.
         // Mixing BufferedOutputStream and SocketChannel on the same Windows socket
         // can stall keep-alive clients; see writeFileRegion().
+        boolean inline = !head && filePath == null && body.length > 0 && body.length <= MAX_INLINE_BODY;
         if (channel != null) {
-            if (!head && filePath == null && body.length > 0 && body.length <= MAX_INLINE_BODY) {
+            if (inline) {
                 ensureScratch(n + body.length);
                 System.arraycopy(body, 0, scratch, n, body.length);
                 writeScratch(n + body.length);
+                rememberWire(n + body.length, head);
             } else {
                 writeScratch(n);
                 if (!head && filePath != null) {
@@ -570,7 +603,16 @@ public final class HttpResponse {
                 } else if (!head && body.length > 0) {
                     writeFully(channel, ByteBuffer.wrap(body));
                 }
+                if (filePath == null && (head || body.length == 0)) {
+                    rememberWire(n, head);
+                }
             }
+        } else if (inline) {
+            ensureScratch(n + body.length);
+            System.arraycopy(body, 0, scratch, n, body.length);
+            out.write(scratch, 0, n + body.length);
+            out.flush();
+            rememberWire(n + body.length, head);
         } else {
             out.write(scratch, 0, n);
             if (!head && filePath != null) {
@@ -579,7 +621,75 @@ public final class HttpResponse {
                 out.write(body);
             }
             out.flush();
+            if (filePath == null && (head || body.length == 0)) {
+                rememberWire(n, head);
+            }
         }
+    }
+
+    /** True when this response is byte-for-byte the previous one on this connection. */
+    private boolean sameWire(boolean omitBody) {
+        if (!wireValid || status != wireStatus || omitBody != wireOmitBody || filePath != null) {
+            return false;
+        }
+        if (body != wireBody || headers.size() != wireHeaderSize || setCookies.size() != wireCookieSize) {
+            return false;
+        }
+        for (int i = 0; i < wireHeaderSize; i++) {
+            if (headers.nameAt(i) != wireNames[i] || headers.valueAt(i) != wireValues[i]) {
+                return false;
+            }
+        }
+        for (int i = 0; i < wireCookieSize; i++) {
+            if (setCookies.get(i) != wireCookies[i]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private void rememberWire(int len, boolean omitBody) {
+        if (wire == null || wire.length < len) {
+            wire = Arrays.copyOf(scratch, Math.max(len, 128));
+            wireView = ByteBuffer.wrap(wire);
+        } else {
+            System.arraycopy(scratch, 0, wire, 0, len);
+        }
+        wireLen = len;
+        wireValid = true;
+        wireStatus = status;
+        wireOmitBody = omitBody;
+        wireBody = body;
+        wireHeaderSize = headers.size();
+        if (wireNames.length < wireHeaderSize) {
+            wireNames = new String[wireHeaderSize];
+            wireValues = new String[wireHeaderSize];
+        }
+        for (int i = 0; i < wireHeaderSize; i++) {
+            wireNames[i] = headers.nameAt(i);
+            wireValues[i] = headers.valueAt(i);
+        }
+        wireCookieSize = setCookies.size();
+        if (wireCookies.length < wireCookieSize) {
+            wireCookies = new String[wireCookieSize];
+        }
+        for (int i = 0; i < wireCookieSize; i++) {
+            wireCookies[i] = setCookies.get(i);
+        }
+    }
+
+    private void writeWire() throws IOException {
+        if (channel != null) {
+            ByteBuffer view = wireView;
+            view.position(0);
+            view.limit(wireLen);
+            while (view.hasRemaining()) {
+                channel.write(view);
+            }
+            return;
+        }
+        out.write(wire, 0, wireLen);
+        out.flush();
     }
 
     private static String lengthString(long n) {
@@ -597,16 +707,18 @@ public final class HttpResponse {
         n = appendAscii(n, " ");
         n = appendAscii(n, reason(status));
         n = appendCrLf(n);
-        for (Map.Entry<String, String> e : headers.entrySet()) {
-            if (isSetCookie(e.getKey())) {
+        int headerCount = headers.size();
+        for (int i = 0; i < headerCount; i++) {
+            String name = headers.nameAt(i);
+            if (isSetCookie(name)) {
                 continue;
             }
-            if (skipContentLength && "content-length".equalsIgnoreCase(e.getKey())) {
+            if (skipContentLength && "content-length".equalsIgnoreCase(name)) {
                 continue;
             }
-            n = appendAscii(n, e.getKey());
+            n = appendAscii(n, name);
             n = appendAscii(n, ": ");
-            String value = e.getValue();
+            String value = headers.valueAt(i);
             if (value != null && !value.isEmpty()) {
                 n = appendAscii(n, value);
             }
@@ -758,6 +870,105 @@ public final class HttpResponse {
 
     private static boolean isSetCookie(String name) {
         return name != null && "set-cookie".equalsIgnoreCase(name.trim());
+    }
+
+    /**
+     * Insertion-ordered headers without a map node per put. Keep-alive
+     * recycle overwrites slots in place, so a steady response does not allocate.
+     */
+    private static final class HeaderTable {
+        private String[] names = new String[8];
+        private String[] values = new String[8];
+        private int size;
+
+        void resetDefault() {
+            names[0] = SERVER_NAME;
+            values[0] = SERVER_VALUE;
+            size = 1;
+        }
+
+        int size() {
+            return size;
+        }
+
+        String nameAt(int index) {
+            return names[index];
+        }
+
+        String valueAt(int index) {
+            return values[index];
+        }
+
+        void put(String name, String value) {
+            int i = indexOf(name);
+            if (i >= 0) {
+                values[i] = value;
+                return;
+            }
+            add(name, value);
+        }
+
+        void putIfAbsent(String name, String value) {
+            int i = indexOf(name);
+            if (i >= 0) {
+                if (values[i] == null) {
+                    values[i] = value;
+                }
+                return;
+            }
+            add(name, value);
+        }
+
+        String get(String name) {
+            int i = indexOf(name);
+            return i < 0 ? null : values[i];
+        }
+
+        String getIgnoreCase(String name) {
+            if (name == null) {
+                return null;
+            }
+            for (int i = 0; i < size; i++) {
+                if (name.equalsIgnoreCase(names[i])) {
+                    return values[i];
+                }
+            }
+            return null;
+        }
+
+        void remove(String name) {
+            int i = indexOf(name);
+            if (i < 0) {
+                return;
+            }
+            int last = size - 1;
+            for (int j = i; j < last; j++) {
+                names[j] = names[j + 1];
+                values[j] = values[j + 1];
+            }
+            names[last] = null;
+            values[last] = null;
+            size = last;
+        }
+
+        private void add(String name, String value) {
+            if (size == names.length) {
+                names = Arrays.copyOf(names, size * 2);
+                values = Arrays.copyOf(values, size * 2);
+            }
+            names[size] = name;
+            values[size] = value;
+            size++;
+        }
+
+        private int indexOf(String name) {
+            for (int i = 0; i < size; i++) {
+                if (name.equals(names[i])) {
+                    return i;
+                }
+            }
+            return -1;
+        }
     }
 
     static String reason(int code) {

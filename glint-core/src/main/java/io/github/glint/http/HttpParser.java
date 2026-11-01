@@ -100,6 +100,19 @@ public final class HttpParser {
      * no regex split, and common header names are reused constants.
      */
     private static HttpRequest parseBuffered(ConnectionInputStream in, ServerConfig config) throws IOException {
+        HttpRequest repeated = in.tryRepeatedHeaders();
+        if (repeated != null) {
+            return repeated;
+        }
+        in.markHeaderStart();
+        try {
+            return parseBufferedFresh(in, config);
+        } finally {
+            in.endHeaderMark();
+        }
+    }
+
+    private static HttpRequest parseBufferedFresh(ConnectionInputStream in, ServerConfig config) throws IOException {
         int max = config.maxHeaderLineBytes();
         int n = in.readHeaderLine(max);
         if (n < 0) {
@@ -182,7 +195,9 @@ public final class HttpParser {
                 headers.put(name, prev + ", " + value);
             }
         }
-        return openBody(method, target, headers, in, config);
+        HttpRequest req = openBody(method, target, headers, in, config);
+        in.rememberIfReusable(req);
+        return req;
     }
 
     private static int indexOf(byte[] b, int len, byte needle, int from) {

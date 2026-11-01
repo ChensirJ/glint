@@ -174,6 +174,24 @@ public final class HttpRequest {
         this.remoteAddress = address == null ? "" : address;
     }
 
+    /**
+     * True when this request has no body stream to replay, so the connection
+     * loop may return the same instance for an identical keep-alive header block.
+     */
+    boolean canReuse() {
+        return bodyIn == EMPTY_BODY;
+    }
+
+    /**
+     * Drop per-request mutable caches before the instance is handed out again.
+     * Header map, path, and query string stay: the raw bytes matched.
+     */
+    void prepareForReuse() {
+        pathParams = null;
+        streamOpened = false;
+        cachedBody = null;
+    }
+
     public Optional<String> header(String name) {
         String v = headers.get(name.toLowerCase(Locale.ROOT));
         return Optional.ofNullable(v);

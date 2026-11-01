@@ -109,6 +109,38 @@ class ConnectionInputStreamTest {
     }
 
     @Test
+    void identicalKeepAliveHeadersReuseTheRequestAndAChangeParsesFresh() throws Exception {
+        String first = "GET /hello HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept: */*\r\n\r\n";
+        String second = "GET /hello HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept: */*\r\n\r\n";
+        String third = "GET /other HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept: */*\r\n\r\n";
+        byte[] raw = (first + second + third).getBytes(StandardCharsets.US_ASCII);
+        ConnectionInputStream in = new ConnectionInputStream(new ByteArrayInputStream(raw));
+        HttpRequest a = HttpParser.parse(in, ServerConfig.defaults());
+        HttpRequest b = HttpParser.parse(in, ServerConfig.defaults());
+        HttpRequest c = HttpParser.parse(in, ServerConfig.defaults());
+        assertEquals("/hello", a.path());
+        assertEquals("/hello", b.path());
+        assertEquals("/other", c.path());
+        assertTrue(a == b);
+        assertTrue(a != c);
+        assertEquals("127.0.0.1", b.header("host").orElseThrow());
+        assertEquals("*/*", c.header("accept").orElseThrow());
+        assertEquals(0, b.bodyBytes().length);
+    }
+
+    @Test
+    void repeatedPostsWithBodiesAreNotReplayedFromTheFirstParse() throws Exception {
+        byte[] one = request("ab".getBytes(StandardCharsets.US_ASCII));
+        byte[] two = request("cd".getBytes(StandardCharsets.US_ASCII));
+        ConnectionInputStream in = new ConnectionInputStream(new ByteArrayInputStream(concat(one, two)));
+        HttpRequest first = HttpParser.parse(in, ServerConfig.defaults());
+        assertArrayEquals("ab".getBytes(StandardCharsets.US_ASCII), first.bodyBytes());
+        HttpRequest second = HttpParser.parse(in, ServerConfig.defaults());
+        assertArrayEquals("cd".getBytes(StandardCharsets.US_ASCII), second.bodyBytes());
+        assertTrue(first != second);
+    }
+
+    @Test
     void outputStreamFlushesSmallAndLargeWrites() throws Exception {
         ByteArrayOutputStream raw = new ByteArrayOutputStream();
         ConnectionOutputStream out = new ConnectionOutputStream(raw);
