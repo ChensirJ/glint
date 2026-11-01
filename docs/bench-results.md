@@ -32,7 +32,7 @@ Numbers are machine-local and not a guarantee of production ranking.
 Numbers are machine-local and not a guarantee of production ranking.
 ## Realistic suite (Glint vs Tomcat vs Tomcat-VT, same app logic)
 
-- Captured: **2026-11-01 09:55:06 CST** (Asia/Shanghai)
+- Captured: **2026-11-01 09:55:06 CST** (Asia/Shanghai) for every scenario except upload-1MiB, re-measured **2026-11-01 11:11:42 CST** on DESKTOP-03H8O4I after #7 landed on main
 - CPU: AMD Ryzen 7 7840HS w/ Radeon 780M Graphics
 - Logical cores: 16
 - RAM: 31.2 GiB
@@ -55,7 +55,7 @@ Scenarios:
 - json+db+cpu: `POST /api/order` with a 7 KiB JSON order (60 lines): parse, price lines, SHA-256 x5 over the body, sleep 15 ms, serialize a ~5 KiB JSON response
 - mixed-traffic: 70% `GET /api/item` (10 ms wait + 1 KiB JSON), 20% 4 KiB static CSS, 10% 1 MiB static file
 - keep-alive vs conn-per-req: `GET /api/hello` tiny JSON; conn-per-req sends `Connection: close` and opens a new TCP connection for every request
-- upload-1MiB: `POST /api/upload` with a 1 MiB body; handler streams via bodyStream() and returns CRC32. The upload rows below are the 2026-11-01 Windows capture. Caller-buffer reads (128 KiB socket cap) are not included. Pending Windows rebench: `java -Dglint.bench.servers=glint,tomcat,tomcat-vt -cp <bench-cp> io.github.glint.bench.RealisticBench 3 3 8 upload` on DESKTOP-03H8O4I. Do not replace these cells with a Linux smoke run.
+- upload-1MiB: `POST /api/upload` with a 1 MiB body; handler streams via bodyStream() and returns CRC32. Rows below are the 2026-11-01 11:11:42 CST rebench on DESKTOP-03H8O4I (main after #7; caller-buffer reads, at most 128 KiB per socket read). RealisticBench 3 rounds x warmup 3s x measure 8s, filter `upload`, servers glint,tomcat,tomcat-vt, c=64, 0 errors. Other scenarios remain the 09:55:06 CST capture.
 
 | Scenario | Clients | Server | req/s (median) | req/s min-max | p50 ms | p99 ms | p99.9 ms | errors | connect errors | timeouts | heap peak MiB | RSS MiB | platform threads peak |
 |----------|--------:|--------|---------------:|---------------|-------:|-------:|---------:|-------:|---------------:|---------:|--------------:|--------:|----------------------:|
@@ -89,9 +89,9 @@ Scenarios:
 | conn-per-req | 64 | Glint | 31620 | 31576-31623 | 1.93 | 3.25 | 5.89 | 0 | 0 | 0 | 159 | 355 | 47 |
 | conn-per-req | 64 | Tomcat | 25514 | 25389-25525 | 2.40 | 3.79 | 5.40 | 0 | 0 | 0 | 359 | 507 | 212 |
 | conn-per-req | 64 | Tomcat-VT | 25902 | 25879-25934 | 2.36 | 4.06 | 5.67 | 0 | 0 | 0 | 175 | 419 | 144 |
-| upload-1MiB | 64 | Glint | 8185 | 7629-8564 | 7.10 | 21.23 | 32.31 | 0 | 0 | 0 | 155 | 301 | 33 |
-| upload-1MiB | 64 | Tomcat | 7631 | 5216-7693 | 7.54 | 29.22 | 56.05 | 0 | 0 | 0 | 166 | 274 | 78 |
-| upload-1MiB | 64 | Tomcat-VT | 9390 | 9069-9409 | 6.03 | 23.82 | 37.70 | 0 | 0 | 0 | 164 | 266 | 82 |
+| upload-1MiB | 64 | Glint | 10938 | 10746-11914 | 5.51 | 11.56 | 14.46 | 0 | 0 | 0 | 159 | 239 | 33 |
+| upload-1MiB | 64 | Tomcat | 6940 | 6924-7099 | 8.80 | 20.46 | 28.64 | 0 | 0 | 0 | 168 | 272 | 79 |
+| upload-1MiB | 64 | Tomcat-VT | 8919 | 8417-9241 | 6.20 | 19.27 | 25.32 | 0 | 0 | 0 | 162 | 268 | 79 |
 
 Mixed-traffic breakdown (median round):
 
