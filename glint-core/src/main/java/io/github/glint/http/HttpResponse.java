@@ -72,7 +72,13 @@ public final class HttpResponse {
      *                or {@code null} when zero-copy must not be used (for example TLS)
      */
     public HttpResponse(OutputStream out, WritableByteChannel channel) {
-        this.out = out instanceof BufferedOutputStream ? out : new BufferedOutputStream(out);
+        // ConnectionOutputStream is already buffered and must not be wrapped again:
+        // a second buffer would hold bytes back from a SocketChannel write.
+        if (out instanceof BufferedOutputStream || out instanceof ConnectionOutputStream) {
+            this.out = out;
+        } else {
+            this.out = new BufferedOutputStream(out);
+        }
         this.channel = channel;
         headers.put("Server", "Glint/0.1");
     }

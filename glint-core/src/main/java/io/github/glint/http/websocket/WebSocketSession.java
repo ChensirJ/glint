@@ -1,7 +1,7 @@
 package io.github.glint.http.websocket;
 
-import java.io.BufferedInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
@@ -21,7 +21,7 @@ import java.util.concurrent.atomic.AtomicReference;
 public final class WebSocketSession implements AutoCloseable {
 
     private final Socket socket;
-    private final BufferedInputStream in;
+    private final InputStream in;
     private final OutputStream out;
     private final String path;
     private final Map<String, Object> attributes = new ConcurrentHashMap<>();
@@ -29,7 +29,7 @@ public final class WebSocketSession implements AutoCloseable {
     private final AtomicInteger closeCode = new AtomicInteger(-1);
     private final AtomicReference<String> closeReason = new AtomicReference<>("");
 
-    WebSocketSession(Socket socket, BufferedInputStream in, OutputStream out, String path) {
+    WebSocketSession(Socket socket, InputStream in, OutputStream out, String path) {
         this.socket = Objects.requireNonNull(socket, "socket");
         this.in = Objects.requireNonNull(in, "in");
         this.out = Objects.requireNonNull(out, "out");
@@ -140,7 +140,7 @@ public final class WebSocketSession implements AutoCloseable {
         close(1000, "bye");
     }
 
-    BufferedInputStream input() {
+    InputStream input() {
         return in;
     }
 
