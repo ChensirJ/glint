@@ -7,8 +7,6 @@ import java.net.Socket;
 import java.nio.ByteBuffer;
 import java.nio.channels.ReadableByteChannel;
 import java.nio.channels.SocketChannel;
-import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Connection-private request input.
@@ -19,29 +17,38 @@ import java.util.concurrent.atomic.AtomicInteger;
  * instance is exactly that class; a small locked buffer also caps how much of
  * a large upload each read pulls in.
  *
- * <p>Ordinary requests use an 8 KiB heap buffer. A body of
- * {@link #LARGE_BODY_BYTES} or more switches the connection onto a reused
- * 1 MiB direct buffer and reads through {@link SocketChannel} so the kernel
- * copies straight into that buffer. One read can take a whole 1 MiB upload
- * once the receive window is wide enough. Bytes already pulled for the next
- * keep-alive request stay in the buffer; they are not discarded.
+ * <p>Ordinary requests use an 8 KiB heap buffer. After
+ * {@link #expectLargeBody()}, a handler read of at least that size is filled
+ * from the socket straight into the caller's array, in slices of at most
+ * {@link #MAX_SOCKET_READ}. On Windows the JDK clamps every {@code WSARecv}
+ * to {@code 128 KiB - 1} and does not loop, so a 1 MiB direct buffer still
+ * costs a second copy into the CRC buffer and never reduces the syscall count.
+ * Bytes already pulled for the next keep-alive request stay in the 8 KiB
+ * buffer; a body read never asks for more than the caller requested, which is
+ * capped at the remaining content length.
  */
 final class ConnectionInputStream extends InputStream {
 
     static final int SMALL_BUFFER = 8 * 1024;
+    /**
+     * Receive-window target for a large body ({@code SO_RCVBUF}). Not the
+     * size of one socket read.
+     */
     static final int LARGE_BUFFER = 1024 * 1024;
-    /** Content-Length at or above this uses the direct buffer. */
+    /** Content-Length at or above this uses caller-buffer socket reads. */
     static final long LARGE_BODY_BYTES = 64 * 1024L;
-
-    private static final ConcurrentLinkedQueue<ByteBuffer> DIRECT_POOL = new ConcurrentLinkedQueue<>();
-    private static final AtomicInteger POOLED = new AtomicInteger();
-    private static final int MAX_POOLED = 8;
+    /**
+     * Largest single socket read. Matches the Windows JDK cap
+     * ({@code MAX_BUFFER_SIZE = 128 KiB - 1} in {@code SocketDispatcher})
+     * and {@code java.net.Socket}'s per-syscall limit. Asking for more is
+     * silently truncated on Windows, which looks like a short read.
+     */
+    static final int MAX_SOCKET_READ = 128 * 1024 - 1;
 
     private final ReadableByteChannel channel;
     private final InputStream raw;
     private byte[] buf;
     private ByteBuffer heapView;
-    private ByteBuffer direct;
     private int pos;
     private int count;
     private boolean large;
@@ -75,61 +82,19 @@ final class ConnectionInputStream extends InputStream {
     }
 
     /**
-     * Switch this connection to the large-body buffer. Safe to call once
-     * headers are parsed and again on later requests (no-op after the first).
-     * Tops the buffer up with one socket read so the handler's first
-     * {@code read} is not limited to the header lookahead.
+     * Mark this connection as serving a large body. Safe to call once headers
+     * are parsed and again on later requests (no-op after the first). Does not
+     * pull extra socket bytes: the handler read fills its own array, and any
+     * lookahead already in the 8 KiB buffer is consumed first.
      */
     void expectLargeBody() throws IOException {
         ensureOpen();
-        if (large) {
-            return;
-        }
-        int avail = Math.max(0, count - pos);
-        if (channel != null) {
-            ByteBuffer bigger = borrowDirect();
-            try {
-                bigger.clear();
-                if (avail > 0) {
-                    bigger.put(buf, pos, avail);
-                }
-                if (bigger.hasRemaining()) {
-                    channel.read(bigger);
-                }
-                bigger.flip();
-            } catch (IOException e) {
-                recycle(bigger);
-                throw e;
-            }
-            direct = bigger;
-            // Heap cursors no longer own those bytes.
-            pos = 0;
-            count = 0;
-        } else {
-            byte[] bigger = new byte[LARGE_BUFFER];
-            if (avail > 0) {
-                System.arraycopy(buf, pos, bigger, 0, avail);
-            }
-            int n = raw.read(bigger, avail, bigger.length - avail);
-            buf = bigger;
-            pos = 0;
-            count = avail + Math.max(n, 0);
-        }
         large = true;
     }
 
     @Override
     public int read() throws IOException {
         ensureOpen();
-        if (direct != null) {
-            if (!direct.hasRemaining()) {
-                int n = fillDirect();
-                if (n <= 0) {
-                    return -1;
-                }
-            }
-            return direct.get() & 0xff;
-        }
         if (pos >= count) {
             int n = fillHeap();
             if (n <= 0) {
@@ -148,16 +113,8 @@ final class ConnectionInputStream extends InputStream {
         if (len == 0) {
             return 0;
         }
-        if (direct != null) {
-            if (!direct.hasRemaining()) {
-                int n = fillDirect();
-                if (n <= 0) {
-                    return -1;
-                }
-            }
-            int n = Math.min(len, direct.remaining());
-            direct.get(b, off, n);
-            return n;
+        if (large && len >= SMALL_BUFFER) {
+            return readLarge(b, off, len);
         }
         if (pos >= count) {
             int n = fillHeap();
@@ -171,12 +128,50 @@ final class ConnectionInputStream extends InputStream {
         return n;
     }
 
+    /**
+     * Copy any buffered lookahead, then read the socket until {@code len}
+     * bytes are in {@code b} or the peer has no more data. Each syscall is
+     * capped so Windows does not truncate it into a false short read.
+     */
+    private int readLarge(byte[] b, int off, int len) throws IOException {
+        int copied = copyBuffered(b, off, len);
+        while (copied < len) {
+            int want = Math.min(len - copied, MAX_SOCKET_READ);
+            int n = readSocket(b, off + copied, want);
+            if (n < 0) {
+                return copied == 0 ? -1 : copied;
+            }
+            if (n == 0) {
+                // A blocking channel read does not return 0. Treat it as EOF
+                // so a confused source cannot spin.
+                return copied == 0 ? -1 : copied;
+            }
+            copied += n;
+        }
+        return copied;
+    }
+
+    private int copyBuffered(byte[] b, int off, int len) {
+        int avail = count - pos;
+        if (avail <= 0 || len <= 0) {
+            return 0;
+        }
+        int n = Math.min(len, avail);
+        System.arraycopy(buf, pos, b, off, n);
+        pos += n;
+        return n;
+    }
+
+    private int readSocket(byte[] b, int off, int len) throws IOException {
+        if (channel != null) {
+            return channel.read(ByteBuffer.wrap(b, off, len));
+        }
+        return raw.read(b, off, len);
+    }
+
     @Override
     public int available() throws IOException {
         ensureOpen();
-        if (direct != null && direct.hasRemaining()) {
-            return direct.remaining();
-        }
         int n = Math.max(0, count - pos);
         if (raw != null) {
             int more = raw.available();
@@ -210,8 +205,6 @@ final class ConnectionInputStream extends InputStream {
             return;
         }
         closed = true;
-        recycle(direct);
-        direct = null;
         buf = null;
         heapView = null;
         if (raw != null) {
@@ -237,42 +230,9 @@ final class ConnectionInputStream extends InputStream {
         return n;
     }
 
-    private int fillDirect() throws IOException {
-        direct.clear();
-        int n = channel.read(direct);
-        if (n > 0) {
-            direct.flip();
-            return n;
-        }
-        direct.limit(0);
-        return n == 0 ? -1 : n;
-    }
-
     private void ensureOpen() throws IOException {
         if (closed) {
             throw new IOException("Stream closed");
         }
-    }
-
-    private static ByteBuffer borrowDirect() {
-        ByteBuffer pooled = DIRECT_POOL.poll();
-        if (pooled != null) {
-            POOLED.decrementAndGet();
-            pooled.clear();
-            return pooled;
-        }
-        return ByteBuffer.allocateDirect(LARGE_BUFFER);
-    }
-
-    private static void recycle(ByteBuffer buffer) {
-        if (buffer == null || !buffer.isDirect() || buffer.capacity() != LARGE_BUFFER) {
-            return;
-        }
-        if (POOLED.get() >= MAX_POOLED) {
-            return;
-        }
-        buffer.clear();
-        POOLED.incrementAndGet();
-        DIRECT_POOL.offer(buffer);
     }
 }

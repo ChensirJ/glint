@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.nio.channels.ReadableByteChannel;
 import java.nio.charset.StandardCharsets;
@@ -17,6 +18,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * Connection buffers must reassemble partial socket reads and must not drop
  * bytes that arrived with a large body (the next keep-alive request).
+ * Large body reads go into the caller array and must not ask the socket for
+ * more than {@link ConnectionInputStream#MAX_SOCKET_READ} at a time.
  */
 class ConnectionInputStreamTest {
 
@@ -41,7 +44,8 @@ class ConnectionInputStreamTest {
         byte[] raw = concat(request(body), second);
         // Chunks smaller than the header buffer, and a total larger than that buffer,
         // so the large-body path has to read ahead without eating the next request.
-        ConnectionInputStream in = new ConnectionInputStream(new ChunkChannel(raw, 1000));
+        CountingChannel channel = new CountingChannel(raw, 1000);
+        ConnectionInputStream in = new ConnectionInputStream(channel);
         ServerConfig config = ServerConfig.builder().maxRequestBodyBytes(1024 * 1024).build();
         HttpRequest req = HttpParser.parse(in, config);
         assertTrue(req.contentLength() >= ConnectionInputStream.LARGE_BODY_BYTES);
@@ -50,6 +54,41 @@ class ConnectionInputStreamTest {
 
         HttpRequest next = HttpParser.parse(in, config);
         assertEquals("/ping", next.path());
+        assertEquals(HttpMethod.GET, next.method());
+        assertTrue(channel.maxRequested <= ConnectionInputStream.MAX_SOCKET_READ,
+                "socket read " + channel.maxRequested);
+    }
+
+    @Test
+    void largeReadFillsCallerBufferWithoutPassingTheNextRequest() throws Exception {
+        byte[] body = new byte[200 * 1024];
+        for (int i = 0; i < body.length; i++) {
+            body[i] = (byte) (i * 13);
+        }
+        byte[] second = "GET /tail HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+                .getBytes(StandardCharsets.US_ASCII);
+        // Chunks larger than the 8 KiB header buffer, so a body read has to
+        // pull from the socket itself and must stop at Content-Length.
+        CountingChannel channel = new CountingChannel(concat(request(body), second), 50 * 1024);
+        ConnectionInputStream in = new ConnectionInputStream(channel);
+        ServerConfig config = ServerConfig.builder().maxRequestBodyBytes(1024 * 1024).build();
+        HttpRequest req = HttpParser.parse(in, config);
+        in.expectLargeBody();
+
+        byte[] user = new byte[64 * 1024];
+        java.io.ByteArrayOutputStream got = new java.io.ByteArrayOutputStream();
+        InputStream bodyIn = req.bodyStream();
+        int r;
+        while ((r = bodyIn.read(user)) >= 0) {
+            got.write(user, 0, r);
+        }
+        assertArrayEquals(body, got.toByteArray());
+        assertTrue(channel.maxRequested > ConnectionInputStream.SMALL_BUFFER,
+                "expected a caller-sized socket read, max was " + channel.maxRequested);
+        assertTrue(channel.maxRequested <= ConnectionInputStream.MAX_SOCKET_READ);
+
+        HttpRequest next = HttpParser.parse(in, config);
+        assertEquals("/tail", next.path());
         assertEquals(HttpMethod.GET, next.method());
     }
 
@@ -107,7 +146,7 @@ class ConnectionInputStreamTest {
     }
 
     /** Returns at most {@code max} bytes per read, like a stingy socket. */
-    private static final class ChunkChannel implements ReadableByteChannel {
+    private static class ChunkChannel implements ReadableByteChannel {
         private final byte[] data;
         private final int max;
         private int pos;
@@ -137,6 +176,21 @@ class ConnectionInputStreamTest {
         @Override
         public void close() {
             open = false;
+        }
+    }
+
+    /** Records the largest destination a single {@code read} was asked to fill. */
+    private static final class CountingChannel extends ChunkChannel {
+        int maxRequested;
+
+        CountingChannel(byte[] data, int max) {
+            super(data, max);
+        }
+
+        @Override
+        public int read(ByteBuffer dst) {
+            maxRequested = Math.max(maxRequested, dst.remaining());
+            return super.read(dst);
         }
     }
 }
