@@ -1,20 +1,20 @@
 # Glint vs Tomcat microbench
 
-- Captured: **2026-10-30 15:55:35 CST** (Asia/Shanghai)
+- Captured: **2026-11-01 08:55:58 CST** (Asia/Shanghai)
 - Method: Java `HttpClient` (HTTP/1.1) virtual-thread workers, same machine, warmup 2s + measure 5s, concurrency 64, path `/hello` body `ok`
 - Glint: in-process `Glint.create(0)` / Tomcat: `tomcat-embed-core` ephemeral port
 - Re-run: `powershell -ExecutionPolicy Bypass -File scripts/run-bench.ps1`
 
 | Server | req/s | errors | p50 (ms) | p99 (ms) | max (ms) |
 |--------|------:|-------:|---------:|---------:|---------:|
-| Glint | 94430 | 0 | 0.59 | 2.07 | 5.75 |
-| Tomcat embed | 50971 | 0 | 1.10 | 4.50 | 14.28 |
+| Glint | 93216 | 0 | 0.62 | 2.19 | 5.57 |
+| Tomcat embed | 104884 | 0 | 0.57 | 1.26 | 12.72 |
 
 Numbers are machine-local and not a guarantee of production ranking.
 
 ## Static files (Glint vs Tomcat DefaultServlet)
 
-- Captured: **2026-10-30 15:55:37 CST** (Asia/Shanghai)
+- Captured: **2026-11-01 08:56:00 CST** (Asia/Shanghai)
 - Method: Java `HttpClient` (HTTP/1.1) virtual-thread workers, warmup 2s + measure 5s, concurrency 64
 - Glint: `staticFiles` with default StaticOptions (small-file cache + zero-copy for large files)
 - Tomcat: embed 10.1.24.0 `DefaultServlet` / `initWebappDefaults`, docBase = temp dir
@@ -22,40 +22,33 @@ Numbers are machine-local and not a guarantee of production ranking.
 
 | Size | Server | req/s | errors | p50 (ms) | p99 (ms) | max (ms) |
 |------|--------|------:|-------:|---------:|---------:|---------:|
-| 1 KiB | Glint | 50039 | 0 | 1.02 | 5.04 | 22.23 |
-| 1 KiB | Tomcat DefaultServlet | 17155 | 0 | 3.27 | 8.12 | 50.19 |
-| 100 KiB | Glint | 10637 | 0 | 5.14 | 24.91 | 48.25 |
-| 100 KiB | Tomcat DefaultServlet | 5734 | 0 | 10.80 | 19.26 | 62.49 |
-| 2 MiB | Glint | 282 | 0 | 216.18 | 401.88 | 416.19 |
-| 2 MiB | Tomcat DefaultServlet | 243 | 0 | 275.66 | 421.08 | 445.15 |
+| 1 KiB | Glint | 97073 | 0 | 0.66 | 2.28 | 23.18 |
+| 1 KiB | Tomcat DefaultServlet | 23775 | 0 | 1.96 | 5.06 | 170.73 |
+| 100 KiB | Glint | 14760 | 0 | 3.86 | 6.31 | 165.75 |
+| 100 KiB | Tomcat DefaultServlet | 10714 | 0 | 5.68 | 12.94 | 25.70 |
+| 2 MiB | Glint | 563 | 0 | 111.38 | 152.70 | 161.19 |
+| 2 MiB | Tomcat DefaultServlet | 575 | 0 | 107.76 | 142.79 | 162.96 |
 
 Numbers are machine-local and not a guarantee of production ranking.
 
-## Realistic server modes
+## Realistic suite (Glint vs Tomcat vs Tomcat-VT, same app logic)
 
-`RealisticBench` starts one child JVM per server. Re-run `scripts/run-bench.ps1` to measure all three. Pass `-Servers "glint,tomcat"` to measure the original pair only.
-
-- `glint`: Glint, virtual-thread-native. Each accepted connection runs on a virtual thread.
-- `tomcat`: embedded Tomcat, default NIO connector, platform thread pool (`maxThreads` 200, `acceptCount` 100). This mode is unchanged.
-- `tomcat-vt`: the same servlet application and the same NIO connector as `tomcat`, with `org.apache.catalina.core.StandardVirtualThreadExecutor` on the connector (one virtual thread per request task). The acceptor and the poller stay on platform threads. This is still NIO/Servlet, not a virtual-thread-native server like Glint.
-
-Reported columns stay the same (req/s, p50, p99, p99.9, errors, connect errors, timeouts, heap, RSS, platform-thread peak). Platform-thread counts do not include virtual threads, so Tomcat-VT worker threads are absent from that column the same way Glint's are.
-
-## Realistic suite (Glint vs Tomcat, same app logic)
-
-- Captured: **2026-10-30 16:22:35 CST** (Asia/Shanghai); upload-1MiB rows re-measured after streaming bodies; json+db+cpu rows re-measured at **2026-10-30 17:10:39 CST** after the Windows timer fix (1 round, see note below); other realistic cells kept from 15:56:21 CST
+- Captured: **2026-11-01 08:56:44 CST** (Asia/Shanghai)
 - CPU: AMD Ryzen 7 7840HS w/ Radeon 780M Graphics
 - Logical cores: 16
 - RAM: 31.2 GiB
 - OS: Windows 11 10.0 amd64
 - JDK: OpenJDK 64-Bit Server VM 21.0.8+9-LTS
 - Tomcat: 10.1.24.0 (embedded, default NIO connector: maxThreads 200, acceptCount 100)
-- Server JVM flags: -Xms256m -Xmx1g -XX:+UseG1GC (same for both, separate child JVMs)
-- Load generator: `RealisticBench`, raw HTTP/1.1 over blocking sockets, one virtual thread per client, closed loop, same machine (loopback), separate JVM from both servers
-- Each cell: warmup 3s + measure 8s, 3 rounds alternating server order; the median round by req/s is shown with the min-max req/s across rounds
-- Handlers: identical `BenchApp` code on both servers; Glint uses default settings except maxRequestBodyBytes 16 MiB (for uploads); Tomcat uses embedded defaults
-- Heap peak and platform-thread peak are sampled every 50 ms inside the server JVM during the measured window; RSS is the process working set right after it
-- Re-run: `powershell -File scripts/run-bench.ps1` (all suites; realistic portion is Glint vs Tomcat vs Tomcat-VT). `-Servers "glint,tomcat"` keeps the original pair. A single suite is `java -cp ... -Dglint.bench.servers=glint,tomcat,tomcat-vt io.github.glint.bench.RealisticBench 3 3 8`
+- Tomcat-VT: 10.1.24.0 (same embedded NIO connector and servlet app; worker executor StandardVirtualThreadExecutor; acceptor and poller stay platform threads)
+- Server JVM flags: -Xms256m -Xmx1g -XX:+UseG1GC (same flags, one child JVM per server)
+- Server modes: `glint` is virtual-thread-native (one virtual thread per connection); `tomcat` is embedded Tomcat on the default NIO connector with a platform thread pool (maxThreads 200); `tomcat-vt` is the same servlet app and the same NIO connector with `StandardVirtualThreadExecutor` (one virtual thread per request task). Acceptor and poller stay platform threads. Tomcat-VT is still NIO/Servlet, not virtual-thread-native like Glint.
+- Servers in this run: `glint`, `tomcat`, `tomcat-vt`
+- Load generator: `RealisticBench`, raw HTTP/1.1 over blocking sockets, one virtual thread per client, closed loop, same machine (loopback), separate JVM from the servers
+- Each cell: warmup 3s + measure 8s, 3 rounds rotating which server goes first; the median round by req/s is shown with the min-max req/s across rounds
+- Handlers: identical `BenchApp` code on every server; Glint uses default settings except maxRequestBodyBytes 16 MiB (for uploads); `tomcat` uses embedded defaults; `tomcat-vt` uses that same servlet app with a virtual-thread executor on the connector
+- Heap peak and platform-thread peak are sampled every 50 ms inside the server JVM during the measured window; RSS is the process working set right after it. Platform-thread counts do not include virtual threads, so Tomcat-VT worker threads are absent from that column the same way Glint's are
+- Re-run: `powershell -File scripts/run-bench.ps1` (all suites, three realistic servers) or `powershell -File scripts/run-bench.ps1 -Servers "glint,tomcat"` for the original pair. A single suite is `java -cp ... -Dglint.bench.servers=glint,tomcat,tomcat-vt io.github.glint.bench.RealisticBench 3 3 8`
 
 Scenarios:
 
@@ -67,53 +60,54 @@ Scenarios:
 
 | Scenario | Clients | Server | req/s (median) | req/s min-max | p50 ms | p99 ms | p99.9 ms | errors | connect errors | timeouts | heap peak MiB | RSS MiB | platform threads peak |
 |----------|--------:|--------|---------------:|---------------|-------:|-------:|---------:|-------:|---------------:|---------:|--------------:|--------:|----------------------:|
-| blocking-50ms | 100 | Glint | 1588 | 1581-1588 | 62.42 | 64.69 | 65.82 | 0 | 0 | 0 | 116 | 183 | 33 |
-| blocking-50ms | 100 | Tomcat | 1588 | 1588-1596 | 62.69 | 67.85 | 72.68 | 0 | 0 | 0 | 96 | 188 | 118 |
-| blocking-50ms | 500 | Glint | 7925 | 7918-7938 | 62.57 | 64.29 | 64.89 | 0 | 0 | 0 | 155 | 233 | 33 |
-| blocking-50ms | 500 | Tomcat | 3181 | 3124-3184 | 155.72 | 187.96 | 189.61 | 0 | 0 | 0 | 155 | 243 | 212 |
-| blocking-50ms | 1000 | Glint | 15875 | 15875-15875 | 62.42 | 64.58 | 66.26 | 0 | 0 | 0 | 174 | 253 | 33 |
-| blocking-50ms | 1000 | Tomcat | 3124 | 3123-3140 | 311.73 | 316.26 | 328.26 | 0 | 0 | 0 | 103 | 292 | 212 |
-| blocking-50ms | 2000 | Glint | 31788 | 31770-31814 | 62.37 | 66.17 | 74.71 | 0 | 0 | 0 | 209 | 301 | 33 |
-| blocking-50ms | 2000 | Tomcat | 2997 | 2995-3004 | 620.20 | 631.53 | 643.03 | 0 | 0 | 0 | 185 | 310 | 212 |
-| blocking-50ms | 4000 | Glint | 56031 | 54657-56505 | 71.67 | 81.37 | 86.52 | 0 | 0 | 0 | 253 | 355 | 33 |
-| blocking-50ms | 4000 | Tomcat | 2738 | 2700-2761 | 1235.13 | 1262.78 | 1267.42 | 0 | 0 | 0 | 180 | 317 | 212 |
-| json+db+cpu | 200 | Glint | 11927 | 11927-11927 | 16.55 | 20.65 | 21.65 | 0 | 0 | 0 | 200 | 311 | 34 |
-| json+db+cpu | 200 | Tomcat | 11759 | 11759-11759 | 16.65 | 21.63 | 23.33 | 0 | 0 | 0 | 262 | 428 | 212 |
-| json+db+cpu | 1000 | Glint | 39523 | 39523-39523 | 23.50 | 39.22 | 41.43 | 0 | 0 | 0 | 717 | 1113 | 34 |
-| json+db+cpu | 1000 | Tomcat | 11968 | 11968-11968 | 82.51 | 88.71 | 90.14 | 0 | 0 | 0 | 233 | 447 | 212 |
-| mixed-traffic | 500 | Glint | 24520 | 22649-28936 | 18.90 | 74.14 | 112.69 | 0 | 0 | 0 | 161 | 354 | 41 |
-| mixed-traffic | 500 | Tomcat | 18401 | 15562-18625 | 28.19 | 49.56 | 75.00 | 0 | 0 | 0 | 363 | 532 | 212 |
-| keep-alive | 64 | Glint | 84771 | 72835-93879 | 0.68 | 2.14 | 3.50 | 0 | 0 | 0 | 157 | 349 | 41 |
-| keep-alive | 64 | Tomcat | 85244 | 84267-87511 | 0.68 | 2.27 | 3.89 | 0 | 0 | 0 | 380 | 531 | 212 |
-| conn-per-req | 64 | Glint | 20714 | 20062-21162 | 2.98 | 4.54 | 10.08 | 0 | 0 | 0 | 154 | 350 | 41 |
-| conn-per-req | 64 | Tomcat | 17759 | 17685-18340 | 3.52 | 5.22 | 6.33 | 0 | 0 | 0 | 382 | 539 | 212 |
-| upload-1MiB | 64 | Glint | 5631 | 5602-5892 | 10.74 | 26.96 | 37.79 | 0 | 0 | 0 | 158 | 241 | 33 |
-| upload-1MiB | 64 | Tomcat | 7200 | 4986-7213 | 8.14 | 28.84 | 42.09 | 0 | 0 | 0 | 162 | 273 | 79 |
+| blocking-50ms | 100 | Glint | 1938 | 1938-1939 | 51.17 | 52.78 | 53.72 | 0 | 0 | 0 | 154 | 230 | 34 |
+| blocking-50ms | 100 | Tomcat | 1574 | 1573-1577 | 63.18 | 64.73 | 64.91 | 0 | 0 | 0 | 91 | 183 | 114 |
+| blocking-50ms | 100 | Tomcat-VT | 1563 | 1563-1563 | 63.44 | 66.04 | 67.09 | 0 | 0 | 0 | 96 | 188 | 29 |
+| blocking-50ms | 500 | Glint | 9699 | 9697-9709 | 51.18 | 52.72 | 53.51 | 0 | 0 | 0 | 156 | 235 | 34 |
+| blocking-50ms | 500 | Tomcat | 3162 | 3157-3165 | 156.02 | 173.88 | 175.10 | 0 | 0 | 0 | 156 | 247 | 212 |
+| blocking-50ms | 500 | Tomcat-VT | 7937 | 7917-7944 | 62.29 | 64.97 | 73.34 | 0 | 159 | 0 | 212 | 342 | 29 |
+| blocking-50ms | 1000 | Glint | 19362 | 19350-19364 | 51.21 | 52.91 | 53.74 | 0 | 0 | 0 | 180 | 263 | 34 |
+| blocking-50ms | 1000 | Tomcat | 3110 | 3100-3112 | 311.16 | 321.57 | 329.92 | 0 | 0 | 0 | 102 | 291 | 212 |
+| blocking-50ms | 1000 | Tomcat-VT | 15888 | 15831-15909 | 62.30 | 69.60 | 77.47 | 0 | 792 | 0 | 534 | 796 | 29 |
+| blocking-50ms | 2000 | Glint | 38454 | 38386-38523 | 51.50 | 54.18 | 55.48 | 0 | 0 | 0 | 235 | 323 | 34 |
+| blocking-50ms | 2000 | Tomcat | 2980 | 2979-2989 | 623.98 | 640.19 | 642.22 | 0 | 0 | 0 | 118 | 301 | 212 |
+| blocking-50ms | 2000 | Tomcat-VT | 29985 | 29825-30381 | 63.52 | 92.16 | 106.10 | 0 | 1115 | 0 | 1010 | 874 | 29 |
+| blocking-50ms | 4000 | Glint | 75538 | 74934-75611 | 52.19 | 57.67 | 61.83 | 0 | 0 | 0 | 277 | 380 | 34 |
+| blocking-50ms | 4000 | Tomcat | 2734 | 2722-2739 | 1242.54 | 1256.88 | 1267.31 | 0 | 0 | 0 | 179 | 313 | 212 |
+| blocking-50ms | 4000 | Tomcat-VT | 38234 | 37607-38596 | 101.23 | 165.62 | 187.71 | 0 | 1705 | 0 | 972 | 1154 | 29 |
+| json+db+cpu | 200 | Glint | 11919 | 11858-11920 | 16.52 | 21.12 | 22.30 | 0 | 0 | 0 | 272 | 406 | 34 |
+| json+db+cpu | 200 | Tomcat | 11977 | 11855-12029 | 16.43 | 21.32 | 23.24 | 0 | 0 | 0 | 259 | 418 | 212 |
+| json+db+cpu | 200 | Tomcat-VT | 6441 | 6421-6442 | 31.31 | 36.80 | 38.51 | 0 | 0 | 0 | 177 | 374 | 29 |
+| json+db+cpu | 1000 | Glint | 30906 | 21173-34191 | 32.63 | 54.22 | 65.49 | 0 | 0 | 0 | 601 | 698 | 34 |
+| json+db+cpu | 1000 | Tomcat | 12285 | 12186-12287 | 80.39 | 86.41 | 87.99 | 0 | 0 | 0 | 340 | 497 | 212 |
+| json+db+cpu | 1000 | Tomcat-VT | 16434 | 15076-16736 | 58.91 | 105.29 | 119.57 | 0 | 0 | 0 | 992 | 1133 | 29 |
+| mixed-traffic | 500 | Glint | 22664 | 20704-34716 | 23.02 | 35.49 | 43.63 | 0 | 0 | 0 | 163 | 361 | 48 |
+| mixed-traffic | 500 | Tomcat | 18760 | 16855-19258 | 28.75 | 44.08 | 47.05 | 0 | 0 | 0 | 343 | 510 | 212 |
+| mixed-traffic | 500 | Tomcat-VT | 22483 | 18048-23327 | 22.49 | 48.74 | 61.28 | 0 | 0 | 0 | 411 | 683 | 146 |
+| keep-alive | 64 | Glint | 103508 | 103158-103755 | 0.60 | 1.14 | 2.22 | 0 | 0 | 0 | 160 | 362 | 47 |
+| keep-alive | 64 | Tomcat | 104795 | 104770-104993 | 0.59 | 1.11 | 2.25 | 0 | 0 | 0 | 358 | 506 | 212 |
+| keep-alive | 64 | Tomcat-VT | 110092 | 109554-110173 | 0.56 | 1.03 | 2.31 | 0 | 0 | 0 | 175 | 419 | 145 |
+| conn-per-req | 64 | Glint | 31620 | 31576-31623 | 1.93 | 3.25 | 5.89 | 0 | 0 | 0 | 159 | 355 | 47 |
+| conn-per-req | 64 | Tomcat | 25514 | 25389-25525 | 2.40 | 3.79 | 5.40 | 0 | 0 | 0 | 359 | 507 | 212 |
+| conn-per-req | 64 | Tomcat-VT | 25902 | 25879-25934 | 2.36 | 4.06 | 5.67 | 0 | 0 | 0 | 175 | 419 | 144 |
+| upload-1MiB | 64 | Glint | 2842 | 2701-5676 | 22.17 | 47.34 | 59.28 | 0 | 0 | 0 | 160 | 355 | 45 |
+| upload-1MiB | 64 | Tomcat | 3628 | 3624-3875 | 17.33 | 40.35 | 58.16 | 0 | 0 | 0 | 356 | 517 | 212 |
+| upload-1MiB | 64 | Tomcat-VT | 5417 | 5392-5481 | 8.22 | 41.11 | 54.06 | 0 | 0 | 0 | 167 | 420 | 143 |
 
 Mixed-traffic breakdown (median round):
 
 | Server | Class | ok requests | p50 ms | p99 ms | p99.9 ms |
 |--------|-------|------------:|-------:|-------:|---------:|
-| Glint | api | 137193 | 26.00 | 76.34 | 109.03 |
-| Glint | static-4KiB | 39209 | 4.23 | 54.74 | 78.68 |
-| Glint | static-1MiB | 19755 | 6.91 | 99.94 | 141.39 |
-| Tomcat | api | 102969 | 30.50 | 50.25 | 74.23 |
-| Tomcat | static-4KiB | 29456 | 16.38 | 33.79 | 57.12 |
-| Tomcat | static-1MiB | 14779 | 21.80 | 57.70 | 89.98 |
+| Glint | api | 126920 | 24.72 | 35.73 | 43.51 |
+| Glint | static-4KiB | 36252 | 13.27 | 23.38 | 29.29 |
+| Glint | static-1MiB | 18140 | 19.07 | 38.64 | 47.71 |
+| Tomcat | api | 105042 | 30.64 | 44.78 | 47.46 |
+| Tomcat | static-4KiB | 29984 | 16.33 | 27.51 | 31.33 |
+| Tomcat | static-1MiB | 15051 | 20.84 | 35.23 | 45.94 |
+| Tomcat-VT | api | 125834 | 28.11 | 49.41 | 60.51 |
+| Tomcat-VT | static-4KiB | 35963 | 6.53 | 27.34 | 37.70 |
+| Tomcat-VT | static-1MiB | 18067 | 13.94 | 54.10 | 78.41 |
 
 errors = reset/EOF/non-200 on an established connection; connect errors = failed TCP connect (e.g. accept backlog full); timeouts = no response within 10 s. The generator closes sockets with SO_LINGER=0 (RST) to avoid client TIME_WAIT exhaustion.
 
-Caveats: closed-loop load (a slow server also slows the generator, so tail latency is understated versus an open-loop tool such as wrk2); generator and server share the same CPU; Glint streams request bodies via bodyStream()/bodyChannel() (bodyBytes() still buffers when called); platform-thread counts exclude Glint's virtual threads by design; simulated waits use Thread.sleep; on Windows the default timer tick is about 15.6 ms, which rounds short sleeps up (see the timer note below).
-
-## Windows timer note (json+db+cpu before/after)
-
-Root cause of the old json+db+cpu@200 loss: on Windows, virtual-thread timed waits park through the JDK scheduler and never raise the OS timer resolution, so a 15 ms sleep landed at about 31 ms (one 15.6 ms tick too late). Tomcat's platform-thread `Thread.sleep(15)` makes HotSpot raise the resolution to 1 ms, so it landed at about 16.6 ms. Since this change `VtServer` keeps a daemon platform thread (`glint-hires-timer`) in a long sleep while the server runs, which keeps the 1 ms resolution active for the whole process (Windows only; disable with `ServerConfig.builder().highResolutionTimer(false)` or `-Dglint.highResolutionTimer=false`). This is a timer-resolution effect, not a faster request path.
-
-| Cell | Before Glint req/s (p99 ms) | After Glint req/s (p99 ms) | Tomcat req/s (p99 ms) |
-|------|---------------------------:|---------------------------:|----------------------:|
-| json+db+cpu c=200 | 6,421 (35.7) | 11,927 (20.7) | 11,759 (21.6) |
-| json+db+cpu c=1000 | 24,436 (68.5) | 39,523 (39.2) | 11,968 (88.7) |
-
-Before = 3-round median from 15:56 CST; after = a single round at 17:10 CST (warmup 3 s, measure 8 s), so treat the after numbers as indicative. Memory at c=1000 went up with throughput: Glint heap peak 618 -> 717 MiB and RSS 766 -> 1113 MiB (Tomcat 233 MiB / 447 MiB in the same run). Not re-measured after the change: blocking-50ms (50 ms is a multiple of 10, so platform sleeps on both servers also landed at about 62.4 ms; the timer fix should move Glint closer to 50 ms but this is unverified), mixed-traffic, keep-alive, conn-per-req and upload-1MiB; those rows are unchanged and still show Tomcat ahead on mixed p99 and uploads.
-
-
+Caveats: closed-loop load (a slow server also slows the generator, so tail latency is understated versus an open-loop tool such as wrk2); generator and server share the same CPU; Glint streams request bodies via bodyStream()/bodyChannel() (bodyBytes() still buffers when called); platform-thread counts exclude virtual threads by design (Glint connection threads and Tomcat-VT request workers). Tomcat-VT is still the NIO connector plus the Servlet container; only the worker executor is virtual threads. simulated waits use Thread.sleep, and on Windows JDK 21 virtual-thread timed sleeps are coarser under load than platform-thread sleeps, which penalizes Glint and Tomcat-VT in sleep-heavy cells.
