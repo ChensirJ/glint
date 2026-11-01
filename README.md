@@ -14,7 +14,7 @@
 Glint is a JDK 21+ HTTP server that runs every connection on a **virtual thread**, ships a live **`/_vt` diagnostics dashboard**, and can replace **Tomcat** in Spring Boot 3.2+ with a single starter dependency.
 
 <p align="center">
-  <!-- Real screenshot: Chrome headless against running demo http://127.0.0.1:8090/_vt (Asia/Shanghai) -->
+  <!-- Real screenshot: Chrome headless against running demo http://127.0.0.1:8090/_vt -->
   <img src="docs/images/diagnostics-overview.png" alt="Glint diagnostics overview" width="820"/>
 </p>
 <p align="center">
@@ -23,7 +23,7 @@ Glint is a JDK 21+ HTTP server that runs every connection on a **virtual thread*
 
 ## Feature gallery demo
 
-A separate living demo lives next to this repo at **`D:\glint-demo`** (sibling folder; not published as part of this git tree).
+A local gallery demo lives in the sibling folder `glint-demo` (not published as part of this git tree).
 
 **Convention:** whenever Glint gains a capability, `glint-demo` is updated in the **same turn** so `/features` stays an accurate gallery of what the server can do.
 
@@ -31,7 +31,7 @@ A separate living demo lives next to this repo at **`D:\glint-demo`** (sibling f
 # from Glint root  - install artifacts into local .m2
 mvn -q clean install -DskipTests
 # then
-cd ..\glint-demo
+cd ../glint-demo
 .\scripts\run.ps1
 ```
 
@@ -276,7 +276,7 @@ The realistic harness has three server modes. `glint` is virtual-thread-native: 
 
 ### Realistic suite (same handlers, separate JVMs, median of 3 rounds)
 
-Captured **2026-11-01 09:55:06 CST** (Asia/Shanghai) for every cell except 1 MiB upload and keep-alive tiny JSON. The upload row was rebenched **2026-11-01 11:11:42 CST** on DESKTOP-03H8O4I after #7 landed on main (same host: AMD Ryzen 7 7840HS, 16 threads, Windows 11, JDK 21.0.8; RealisticBench 3 rounds x warmup 3s x measure 8s, filter `upload`, servers glint,tomcat,tomcat-vt, c=64, 0 errors). Keep-alive tiny JSON was rebenched **2026-11-01 12:22:33 CST** on DESKTOP-03H8O4I after #10 landed on main (same host: AMD Ryzen 7 7840HS, 16 logical cores, 31.2 GiB RAM, Windows 11, OpenJDK 21.0.8, Tomcat embed 10.1.24; RealisticBench 3 rounds x warmup 3s x measure 8s, filter `keep-alive`, servers glint,tomcat,tomcat-vt, c=64, 0 errors). Each server runs in its own JVM (`-Xms256m -Xmx1g -XX:+UseG1GC`); handlers are the same `BenchApp` code; the load generator is a separate JVM using raw HTTP/1.1 sockets on virtual threads. Application errors and timeouts were 0 in every cell. Tomcat-VT is the only mode with connect errors: on blocking-50ms they start at 500 clients (159, then 792, 1,115, and 1,705 at 500 / 1,000 / 2,000 / 4,000 clients) and heap reaches the 1 GiB cap (1,010 MiB at 2,000 clients, RSS 1,154 MiB at 4,000). Glint recorded 0 connect errors in every cell. req/s is the median round; p99 is milliseconds. Min-max, memory, and thread columns are in the docs.
+Captured **2026-11-01 09:55:06 CST** for every cell except 1 MiB upload and keep-alive tiny JSON. The upload row was rebenched **2026-11-01 11:11:42 CST** on the same Windows bench host after #7 landed on main (AMD Ryzen 7 7840HS, 16 threads, Windows 11, JDK 21.0.8; RealisticBench 3 rounds x warmup 3s x measure 8s, filter `upload`, servers glint,tomcat,tomcat-vt, c=64, 0 errors). Keep-alive tiny JSON was rebenched **2026-11-01 12:22:33 CST** on the same Windows bench host after #10 landed on main (AMD Ryzen 7 7840HS, 16 logical cores, 31.2 GiB RAM, Windows 11, OpenJDK 21.0.8, Tomcat embed 10.1.24; RealisticBench 3 rounds x warmup 3s x measure 8s, filter `keep-alive`, servers glint,tomcat,tomcat-vt, c=64, 0 errors). Each server runs in its own JVM (`-Xms256m -Xmx1g -XX:+UseG1GC`); handlers are the same `BenchApp` code; the load generator is a separate JVM using raw HTTP/1.1 sockets on virtual threads. Application errors and timeouts were 0 in every cell. Tomcat-VT is the only mode with connect errors: on blocking-50ms they start at 500 clients (159, then 792, 1,115, and 1,705 at 500 / 1,000 / 2,000 / 4,000 clients) and heap reaches the 1 GiB cap (1,010 MiB at 2,000 clients, RSS 1,154 MiB at 4,000). Glint recorded 0 connect errors in every cell. req/s is the median round; p99 is milliseconds. Min-max, memory, and thread columns are in the docs.
 
 | Scenario | Clients | Glint req/s | Tomcat req/s | Tomcat-VT req/s | Glint p99 | Tomcat p99 | Tomcat-VT p99 |
 |----------|--------:|------------:|-------------:|----------------:|----------:|-----------:|--------------:|
@@ -304,7 +304,7 @@ Platform threads, virtual threads not counted: Glint stays at 33-48 across the s
 
 ### `/hello` and static files (in-process microbench, 64 clients, warmup 2s + 5s)
 
-Captured **2026-11-01 08:55:58 CST** for `/hello` and **2026-11-01 08:56:00 CST** for static files (Asia/Shanghai). Java `HttpClient` load in the same JVM as the server under test. These rows are Glint vs platform Tomcat only; the microbench does not start Tomcat-VT.
+Captured **2026-11-01 08:55:58 CST** for `/hello` and **2026-11-01 08:56:00 CST** for static files. Java `HttpClient` load in the same JVM as the server under test. These rows are Glint vs platform Tomcat only; the microbench does not start Tomcat-VT.
 
 | Case | Glint req/s | Tomcat req/s | Glint p99 ms | Tomcat p99 ms |
 |------|------------:|-------------:|-------------:|--------------:|
@@ -369,7 +369,7 @@ Full Servlet 6 surface, HTTP/2/3, DI/ORM frameworks.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Keep **`glint-demo`** (`D:\glint-demo`) in sync when adding user-visible features.
+See [CONTRIBUTING.md](CONTRIBUTING.md). Keep the sibling folder `glint-demo` in sync when adding user-visible features.
 
 ## License
 

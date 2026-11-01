@@ -138,7 +138,7 @@ public final class ComparisonBench {
         Collections.sort(t);
         StringBuilder sb = new StringBuilder();
         sb.append("# Glint vs Tomcat microbench\n\n");
-        sb.append("- Captured: **").append(when).append("** (Asia/Shanghai)\n");
+        sb.append("- Captured: **").append(when).append("**\n");
         sb.append("- Method: Java `HttpClient` (HTTP/1.1) virtual-thread workers, same machine, ");
         sb.append("warmup ").append(warmup).append("s + measure ").append(duration).append("s, ");
         sb.append("concurrency ").append(concurrency).append(", path `/hello` body `ok`\n");

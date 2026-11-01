@@ -754,7 +754,7 @@ public final class RealisticBench {
                               Map<Scenario, List<List<Run>>> results) throws IOException {
         StringBuilder sb = new StringBuilder();
         sb.append("\n## Realistic suite (Glint vs Tomcat vs Tomcat-VT, same app logic)\n\n");
-        sb.append("- Captured: **").append(when).append("** (Asia/Shanghai)\n");
+        sb.append("- Captured: **").append(when).append("**\n");
         specs.forEach((k, v) -> sb.append("- ").append(k).append(": ").append(v).append('\n'));
         sb.append("- Server modes: `glint` is virtual-thread-native (one virtual thread per connection); ")
                 .append("`tomcat` is embedded Tomcat on the default NIO connector with a platform thread pool ")
