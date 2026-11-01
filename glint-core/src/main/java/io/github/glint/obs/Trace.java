@@ -58,6 +58,21 @@ public final class Trace {
     /** Run {@code body} with a fresh request context and record latency metrics. */
     public static void run(HttpRequest req, ThrowingRunnable body) throws Exception {
         long start = System.nanoTime();
+        // Pinning attribution and exporters need a context. A tiny keep-alive
+        // request with neither would otherwise allocate a Ctx, an id string,
+        // and a span list that nothing reads.
+        if (!PinningWatcher.isStarted() && !ObsExporters.hasAny()) {
+            try {
+                body.run();
+            } finally {
+                long dur = System.nanoTime() - start;
+                METRICS.record(req.path(), dur);
+                if (dur > 500_000_000L) {
+                    SlowLog.dump(new Ctx("slow", req.path(), start, List.of()), dur);
+                }
+            }
+            return;
+        }
         Ctx ctx = new Ctx(
                 Long.toHexString(NEXT_ID.incrementAndGet()),
                 req.path(),

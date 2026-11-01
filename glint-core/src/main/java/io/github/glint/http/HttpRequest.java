@@ -144,7 +144,10 @@ public final class HttpRequest {
         return query;
     }
 
-    /** Decoded query parameters (first value wins for duplicate keys). */
+    /**
+     * Decoded query parameters (first value wins for duplicate keys).
+     * The map is unmodifiable. Keep-alive copies share it when the query bytes match.
+     */
     public Map<String, String> queryParams() {
         if (queryParams == null) {
             queryParams = parseQuery(query);
@@ -157,6 +160,10 @@ public final class HttpRequest {
     }
 
 
+    /**
+     * Request headers, lower-case names, unmodifiable. The parser fills the map
+     * before this view is published and nothing in the server mutates it afterwards.
+     */
     public Map<String, String> headers() {
         return headers;
     }
@@ -172,6 +179,40 @@ public final class HttpRequest {
     /** Package-visible: filled in by the connection loop. */
     void remoteAddress(String address) {
         this.remoteAddress = address == null ? "" : address;
+    }
+
+    /**
+     * True when this request has no body stream to replay, so a later identical
+     * header block on this connection can be served by {@link #spawnKeepAlive()}.
+     */
+    boolean canReuse() {
+        return bodyIn == EMPTY_BODY;
+    }
+
+    /**
+     * A new request for the same header bytes. Shares the method, target,
+     * unmodifiable header map, and decoded query cache. Does not share path
+     * params, the cached body, or {@code streamOpened}, and does not modify
+     * {@code this}, so a handler that retained the previous instance keeps
+     * seeing that dispatch.
+     */
+    HttpRequest spawnKeepAlive() {
+        return new HttpRequest(this);
+    }
+
+    private HttpRequest(HttpRequest src) {
+        this.method = src.method;
+        this.rawPath = src.rawPath;
+        this.path = src.path;
+        this.query = src.query;
+        this.headers = src.headers;
+        this.declaredContentLength = src.declaredContentLength;
+        this.bodyIn = EMPTY_BODY;
+        this.queryParams = src.queryParams;
+        this.pathParams = null;
+        this.cachedBody = null;
+        this.streamOpened = false;
+        this.remoteAddress = "";
     }
 
     public Optional<String> header(String name) {

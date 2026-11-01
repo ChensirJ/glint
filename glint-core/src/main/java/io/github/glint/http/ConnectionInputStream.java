@@ -56,6 +56,17 @@ final class ConnectionInputStream extends InputStream {
     private boolean closed;
     /** Reused line scratch for the header parser. Not the socket buffer. */
     private byte[] lineBuf = new byte[160];
+    /**
+     * Bytes of the last empty-body header block on this connection, and the
+     * request parsed from those exact bytes. Keep-alive clients repeat the
+     * same request; a match skips the parse and the objects it allocated.
+     */
+    private byte[] repeatedHeaders;
+    private HttpRequest repeatedRequest;
+    private int fillEpoch;
+    private boolean marking;
+    private int headerMark = -1;
+    private int headerEpoch = -1;
 
     ConnectionInputStream(Socket socket) throws IOException {
         SocketChannel ch = socket.getChannel();
@@ -144,6 +155,68 @@ final class ConnectionInputStream extends InputStream {
     /** Valid until the next {@link #readHeaderLine(int)}. */
     byte[] headerLineBuffer() {
         return lineBuf;
+    }
+
+    /**
+     * If the bytes at the read cursor are the same header block as the previous
+     * empty-body request on this connection, consume them and return a new
+     * request that shares that parse. The previous instance is left as the
+     * handler saw it. A miss leaves the cursor where the parser can read normally.
+     */
+    HttpRequest tryRepeatedHeaders() throws IOException {
+        byte[] prev = repeatedHeaders;
+        HttpRequest req = repeatedRequest;
+        if (prev == null || req == null || !req.canReuse()) {
+            return null;
+        }
+        if (pos >= count) {
+            int n = fillHeap();
+            if (n <= 0) {
+                return null;
+            }
+        }
+        int avail = count - pos;
+        if (avail < prev.length) {
+            return null;
+        }
+        if (!Arrays.equals(buf, pos, pos + prev.length, prev, 0, prev.length)) {
+            return null;
+        }
+        pos += prev.length;
+        return req.spawnKeepAlive();
+    }
+
+    /** Note where the next header block starts so it can be saved if the parse stays in this buffer. */
+    void markHeaderStart() {
+        marking = true;
+        headerMark = pos;
+        headerEpoch = fillEpoch;
+    }
+
+    void endHeaderMark() {
+        marking = false;
+    }
+
+    /**
+     * Keep {@code req} for the next identical header block. No-op when the
+     * bytes were overwritten by a later socket read, or when the request has
+     * a body stream that cannot be replayed.
+     */
+    void rememberIfReusable(HttpRequest req) {
+        if (req == null || !req.canReuse() || !marking) {
+            return;
+        }
+        int start = headerMark;
+        int end = pos;
+        if (start < 0 || end <= start || end > count || headerEpoch != fillEpoch) {
+            return;
+        }
+        int len = end - start;
+        if (repeatedHeaders == null || repeatedHeaders.length != len) {
+            repeatedHeaders = new byte[len];
+        }
+        System.arraycopy(buf, start, repeatedHeaders, 0, len);
+        repeatedRequest = req;
     }
 
     @Override
@@ -268,6 +341,8 @@ final class ConnectionInputStream extends InputStream {
     }
 
     private int fillHeap() throws IOException {
+        int oldCount = count;
+        int oldPos = pos;
         int n;
         if (channel != null) {
             heapView.clear();
@@ -278,10 +353,18 @@ final class ConnectionInputStream extends InputStream {
         if (n > 0) {
             pos = 0;
             count = n;
+            fillEpoch++;
+            // The mark was taken on an empty buffer. The bytes just read are
+            // the header block, starting at index 0.
+            if (marking && oldPos >= oldCount && headerMark == oldCount) {
+                headerMark = 0;
+                headerEpoch = fillEpoch;
+            }
             return n;
         }
         pos = 0;
         count = 0;
+        fillEpoch++;
         return n;
     }
 

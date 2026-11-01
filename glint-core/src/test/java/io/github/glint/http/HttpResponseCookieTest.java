@@ -34,6 +34,33 @@ class HttpResponseCookieTest {
     }
 
     @Test
+    void recycledTinyBodyDropsPreviousHeadersAndMatchesTheNextWrite() throws Exception {
+        ByteArrayOutputStream raw = new ByteArrayOutputStream();
+        HttpResponse resp = new HttpResponse(raw);
+        resp.header("X-One", "yes");
+        resp.text("ok");
+        resp.finish();
+
+        resp.recycle();
+        raw.reset();
+        resp.text("ok");
+        resp.finish();
+        String second = raw.toString(StandardCharsets.US_ASCII);
+        assertFalse(second.contains("X-One"), second);
+        assertTrue(second.contains("Content-Type: text/plain; charset=utf-8\r\n"), second);
+        assertTrue(second.contains("Content-Length: 2\r\n"), second);
+        assertTrue(second.contains("Connection: keep-alive\r\n"), second);
+        assertTrue(second.endsWith("\r\n\r\nok"), second);
+
+        byte[] steady = raw.toByteArray();
+        resp.recycle();
+        raw.reset();
+        resp.text("ok");
+        resp.finish();
+        assertArrayEquals(steady, raw.toByteArray());
+    }
+
+    @Test
     void cookieBuilderEmitsAttributes() throws Exception {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         HttpResponse resp = new HttpResponse(out);
