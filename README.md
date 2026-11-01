@@ -57,7 +57,66 @@ cd ../glint-demo
 
 ## Quick start - standalone
 
-Yes, you can use it that way - but you still need a `main` method (README snippets often omit the class for brevity). Full runnable program:
+The bundled sample is a small notes service you can run and copy. `main` only wires config, middleware, routes, and startup. Handlers are separate classes under `glint-examples/src/main/java/io/github/glint/examples/standalone/`:
+
+| Class | Role |
+|-------|------|
+| `NotesServer` | Loopback bind, access log, `/_vt`, mount routes, shutdown hook, `join` |
+| `HealthRoutes` | `GET /health` |
+| `HomePage` | `GET /` |
+| `NoteRoutes` | JSON CRUD, `/api/notes/{id}`, `?done=`, one SSE snapshot |
+| `NoteStore` | In-memory notes |
+
+```bash
+./scripts/run-standalone.sh
+# Windows: .\scripts\run-standalone.ps1
+# or: mvn -pl glint-examples -am exec:java
+```
+
+Open http://127.0.0.1:8080/ , http://127.0.0.1:8080/api/notes , and http://127.0.0.1:8080/_vt/ . Ctrl+C runs the shutdown hook (`Glint.stop()`), which stops accepting and drains in-flight requests.
+
+`NotesServer.main`:
+
+```java
+public static void main(String[] args) throws Exception {
+    int port = args.length > 0 ? Integer.parseInt(args[0]) : 8080;
+    Glint app = wire(port);
+    app.startAsync();
+    Runtime.getRuntime().addShutdownHook(new Thread(app::stop, "glint-shutdown"));
+    Thread.currentThread().join();
+}
+```
+
+`wire` is the composition root (full method in `NotesServer`):
+
+```java
+public static Glint wire(int port) throws Exception {
+    NoteStore notes = new NoteStore();
+    ServerConfig config = ServerConfig.builder()
+            .bindAddress(InetAddress.getByName("127.0.0.1"))
+            .shutdownWaitMs(5_000L)
+            .build();
+    Glint app = Glint.create(port)
+            .config(config)
+            .before(Middlewares.accessLog())
+            .diagnostics("/_vt");
+    new HealthRoutes().mount(app);
+    new HomePage().mount(app);
+    new NoteRoutes(notes).mount(app);
+    return app;
+}
+```
+
+Create a note, then read it back (path param `{id}`):
+
+```bash
+curl -s -X POST http://127.0.0.1:8080/api/notes \
+  -H "Content-Type: application/json" \
+  -d "{\"title\":\"Buy milk\",\"body\":\"oat\",\"done\":false}"
+curl -s http://127.0.0.1:8080/api/notes/1
+```
+
+Ten-line miniature:
 
 ```java
 import io.github.glint.Glint;
@@ -66,23 +125,16 @@ import io.github.glint.middleware.Middlewares;
 public class Main {
     public static void main(String[] args) throws Exception {
         Glint.create(8080)
-            .before(Middlewares.requestLogging())
-            .before(Middlewares.cors())
+            .before(Middlewares.accessLog())
             .get("/hello", (req, resp) -> resp.text("Hello, virtual threads!"))
             .diagnostics("/_vt")
-            .startAsync(); // non-blocking start
-
-        Thread.currentThread().join(); // keep the JVM alive
+            .startAsync();
+        Thread.currentThread().join();
     }
 }
 ```
 
-Bundled entry point with a real `main`: `io.github.glint.examples.StandaloneDemo`.
-
-```bash
-.\scripts\run-standalone.ps1
-# Open http://127.0.0.1:8080/hello and http://127.0.0.1:8080/_vt/
-```
+Server-Sent Events also have a separate entry point: `io.github.glint.examples.SseDemo`.
 
 
 ## Quick start - Spring Boot 3.2+ (replace Tomcat)
