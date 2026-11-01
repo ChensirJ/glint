@@ -88,7 +88,7 @@ public final class StaticBench {
 
         StringBuilder section = new StringBuilder();
         section.append("\n## Static files (Glint vs Tomcat DefaultServlet)\n\n");
-        section.append("- Captured: **").append(when).append("** (Asia/Shanghai)\n");
+        section.append("- Captured: **").append(when).append("**\n");
         section.append("- Method: Java `HttpClient` (HTTP/1.1) virtual-thread workers, ");
         section.append("warmup ").append(warmupSec).append("s + measure ").append(durationSec);
         section.append("s, concurrency ").append(concurrency).append('\n');

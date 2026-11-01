@@ -1,6 +1,6 @@
 # Glint vs Tomcat microbench
 
-- Captured: **2026-11-01 08:55:58 CST** (Asia/Shanghai)
+- Captured: **2026-11-01 08:55:58 CST**
 - Method: Java `HttpClient` (HTTP/1.1) virtual-thread workers, same machine, warmup 2s + measure 5s, concurrency 64, path `/hello` body `ok`
 - Glint: in-process `Glint.create(0)` / Tomcat: `tomcat-embed-core` ephemeral port
 - Re-run: `powershell -ExecutionPolicy Bypass -File scripts/run-bench.ps1`
@@ -14,7 +14,7 @@ Numbers are machine-local and not a guarantee of production ranking.
 
 ## Static files (Glint vs Tomcat DefaultServlet)
 
-- Captured: **2026-11-01 08:56:00 CST** (Asia/Shanghai)
+- Captured: **2026-11-01 08:56:00 CST**
 - Method: Java `HttpClient` (HTTP/1.1) virtual-thread workers, warmup 2s + measure 5s, concurrency 64
 - Glint: `staticFiles` with default StaticOptions (small-file cache + zero-copy for large files)
 - Tomcat: embed 10.1.24.0 `DefaultServlet` / `initWebappDefaults`, docBase = temp dir
@@ -32,7 +32,7 @@ Numbers are machine-local and not a guarantee of production ranking.
 Numbers are machine-local and not a guarantee of production ranking.
 ## Realistic suite (Glint vs Tomcat vs Tomcat-VT, same app logic)
 
-- Captured: **2026-11-01 09:55:06 CST** (Asia/Shanghai) for every scenario except upload-1MiB and keep-alive. upload-1MiB was re-measured **2026-11-01 11:11:42 CST** on DESKTOP-03H8O4I after #7 landed on main. Keep-alive was re-measured **2026-11-01 12:22:33 CST** on DESKTOP-03H8O4I after #10 landed on main
+- Captured: **2026-11-01 09:55:06 CST** for every scenario except upload-1MiB and keep-alive. upload-1MiB was re-measured **2026-11-01 11:11:42 CST** on the same Windows bench host after #7 landed on main. Keep-alive was re-measured **2026-11-01 12:22:33 CST** on the same Windows bench host after #10 landed on main
 - CPU: AMD Ryzen 7 7840HS w/ Radeon 780M Graphics
 - Logical cores: 16
 - RAM: 31.2 GiB
@@ -54,8 +54,8 @@ Scenarios:
 - blocking-50ms: `GET /api/slow`, handler sleeps 50 ms (slow downstream), keep-alive
 - json+db+cpu: `POST /api/order` with a 7 KiB JSON order (60 lines): parse, price lines, SHA-256 x5 over the body, sleep 15 ms, serialize a ~5 KiB JSON response
 - mixed-traffic: 70% `GET /api/item` (10 ms wait + 1 KiB JSON), 20% 4 KiB static CSS, 10% 1 MiB static file
-- keep-alive vs conn-per-req: `GET /api/hello` tiny JSON; conn-per-req sends `Connection: close` and opens a new TCP connection for every request. Keep-alive rows below are the 2026-11-01 12:22:33 CST rebench on DESKTOP-03H8O4I after #10 landed on main (AMD Ryzen 7 7840HS, 16 logical cores, 31.2 GiB RAM, Windows 11, OpenJDK 21.0.8, Tomcat embed 10.1.24). RealisticBench 3 rounds x warmup 3s x measure 8s, filter `keep-alive`, servers glint,tomcat,tomcat-vt, c=64, 0 errors. **Keep-alive tiny JSON: Glint leads after #10** (116,503 vs Tomcat-VT 112,527 vs Tomcat 108,893). After cutting per-request work on the keep-alive hot path (#10), tiny JSON at 64 clients: Glint 116,503 req/s (min-max 116,299-146,163), Tomcat-VT 112,527 (111,206-112,663), Tomcat 108,893 (107,391-109,226). p50 was 0.54 / 0.57 / 0.55 ms and p99 was 0.93 / 1.00 / 0.99 ms (Glint / Tomcat / Tomcat-VT). conn-per-req rows stay the 09:55:06 CST capture. p99.9, heap peak, RSS, and platform-thread peak on the keep-alive rows were not in this rebench and stay the 09:55:06 CST values.
-- upload-1MiB: `POST /api/upload` with a 1 MiB body; handler streams via bodyStream() and returns CRC32. Rows below are the 2026-11-01 11:11:42 CST rebench on DESKTOP-03H8O4I (main after #7; caller-buffer reads, at most 128 KiB per socket read). RealisticBench 3 rounds x warmup 3s x measure 8s, filter `upload`, servers glint,tomcat,tomcat-vt, c=64, 0 errors. Keep-alive is the 2026-11-01 12:22:33 CST rebench. The other scenarios remain the 09:55:06 CST capture.
+- keep-alive vs conn-per-req: `GET /api/hello` tiny JSON; conn-per-req sends `Connection: close` and opens a new TCP connection for every request. Keep-alive rows below are the 2026-11-01 12:22:33 CST rebench on the same Windows bench host after #10 landed on main (AMD Ryzen 7 7840HS, 16 logical cores, 31.2 GiB RAM, Windows 11, OpenJDK 21.0.8, Tomcat embed 10.1.24). RealisticBench 3 rounds x warmup 3s x measure 8s, filter `keep-alive`, servers glint,tomcat,tomcat-vt, c=64, 0 errors. **Keep-alive tiny JSON: Glint leads after #10** (116,503 vs Tomcat-VT 112,527 vs Tomcat 108,893). After cutting per-request work on the keep-alive hot path (#10), tiny JSON at 64 clients: Glint 116,503 req/s (min-max 116,299-146,163), Tomcat-VT 112,527 (111,206-112,663), Tomcat 108,893 (107,391-109,226). p50 was 0.54 / 0.57 / 0.55 ms and p99 was 0.93 / 1.00 / 0.99 ms (Glint / Tomcat / Tomcat-VT). conn-per-req rows stay the 09:55:06 CST capture. p99.9, heap peak, RSS, and platform-thread peak on the keep-alive rows were not in this rebench and stay the 09:55:06 CST values.
+- upload-1MiB: `POST /api/upload` with a 1 MiB body; handler streams via bodyStream() and returns CRC32. Rows below are the 2026-11-01 11:11:42 CST rebench on the same Windows bench host (main after #7; caller-buffer reads, at most 128 KiB per socket read). RealisticBench 3 rounds x warmup 3s x measure 8s, filter `upload`, servers glint,tomcat,tomcat-vt, c=64, 0 errors. Keep-alive is the 2026-11-01 12:22:33 CST rebench. The other scenarios remain the 09:55:06 CST capture.
 
 | Scenario | Clients | Server | req/s (median) | req/s min-max | p50 ms | p99 ms | p99.9 ms | errors | connect errors | timeouts | heap peak MiB | RSS MiB | platform threads peak |
 |----------|--------:|--------|---------------:|---------------|-------:|-------:|---------:|-------:|---------------:|---------:|--------------:|--------:|----------------------:|
