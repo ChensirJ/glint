@@ -116,16 +116,23 @@ class ConnectionInputStreamTest {
         byte[] raw = (first + second + third).getBytes(StandardCharsets.US_ASCII);
         ConnectionInputStream in = new ConnectionInputStream(new ByteArrayInputStream(raw));
         HttpRequest a = HttpParser.parse(in, ServerConfig.defaults());
+        a.pathParam("mark", "first");
+        byte[] aBody = a.bodyBytes();
         HttpRequest b = HttpParser.parse(in, ServerConfig.defaults());
         HttpRequest c = HttpParser.parse(in, ServerConfig.defaults());
         assertEquals("/hello", a.path());
         assertEquals("/hello", b.path());
         assertEquals("/other", c.path());
-        assertTrue(a == b);
+        assertTrue(a != b);
         assertTrue(a != c);
+        assertEquals("first", a.pathParam("mark"));
+        assertEquals(null, b.pathParam("mark"));
+        assertArrayEquals(aBody, a.bodyBytes());
+        assertEquals(0, b.bodyBytes().length);
         assertEquals("127.0.0.1", b.header("host").orElseThrow());
         assertEquals("*/*", c.header("accept").orElseThrow());
-        assertEquals(0, b.bodyBytes().length);
+        assertThrows(UnsupportedOperationException.class, () -> a.headers().put("x-extra", "1"));
+        assertEquals(null, b.header("x-extra").orElse(null));
     }
 
     @Test

@@ -1,6 +1,6 @@
 # Glint vs Tomcat microbench
 
-- Captured: **2026-11-01 05:58 UTC**
+- Captured: **2026-11-01 06:09 UTC**
 - Host: Linux 6.12 x86_64, 4 logical cores (Intel Xeon), 15.6 GiB RAM, OpenJDK 21.0.12
 - Method: Java `HttpClient` (HTTP/1.1) virtual-thread workers, same JVM as the server, warmup 2s + measure 5s, concurrency 64, path `/hello` body `ok`
 - JVM flags: `-Xms256m -Xmx1g -XX:+UseG1GC`
@@ -10,14 +10,14 @@
 
 | Server | req/s | errors | p50 (ms) | p99 (ms) | max (ms) |
 |--------|------:|-------:|---------:|---------:|---------:|
-| Glint | 63251 | 0 | 0.91 | 2.91 | 18.13 |
-| Tomcat embed | 59266 | 0 | 0.99 | 3.32 | 9.25 |
+| Glint | 65063 | 0 | 0.89 | 2.97 | 17.07 |
+| Tomcat embed | 58099 | 0 | 1.01 | 3.81 | 9.77 |
 
-Three runs on this host after the keep-alive allocation cut: Glint 63,221 / 64,164 / 63,251 req/s, Tomcat 58,297 / 57,292 / 59,266, 0 errors. The table is the middle Glint run (63,251) and the Tomcat result from that same process. The same three-run harness on this host before the cut: Glint 61,730 / 61,306 / 60,991 vs Tomcat 58,637 / 58,264 / 58,888. Median before was Glint 61,306 vs Tomcat 58,264 in that run (p50 0.94 / 1.02 ms, p99 2.98 / 3.08 ms).
+Three runs on this host after the keep-alive allocation cut: Glint 65,063 / 65,214 / 62,962 req/s, Tomcat 58,099 / 59,078 / 57,513, 0 errors. The table is the middle Glint run (65,063) and the Tomcat result from that same process. The same three-run harness on this host before the cut: Glint 61,730 / 61,306 / 60,991 vs Tomcat 58,637 / 58,264 / 58,888. Median before was Glint 61,306 vs Tomcat 58,264 in that run (p50 0.94 / 1.02 ms, p99 2.98 / 3.08 ms).
 
-On this host Glint leads `/hello`, and the cut widened that lead. Identical empty-body header blocks are parsed once per connection, an unchanged small response is written from a cached buffer, and the per-request trace object is skipped when the pinning watcher and exporters are off (this harness disables the watcher). A separate-JVM load of the same path dropped server young-gen traffic from collections of about 129 MB and 153 MB during the measure to a single 35 MB collection for the whole server process. Static-file rows below were not re-run.
+On this host Glint leads `/hello`, and the cut widened that lead. Identical empty-body header blocks are parsed once per connection. Each hit is a new request object that shares the unmodifiable header map and query cache, so a handler that retained the previous request does not see the next dispatch. An unchanged small response is written from a cached buffer, and the per-request trace object is skipped when the pinning watcher and exporters are off (this harness disables the watcher). A separate-JVM load of the same path, measured on the first cut, dropped server young-gen traffic from collections of about 129 MB and 153 MB during the measure to a single 35 MB collection for the whole server process. Static-file rows below were not re-run.
 
-Shared-path sanity on this host, Glint only, raw HTTP/1.1, c=64, warmup 2s + measure 5s, pinning watcher left on: keep-alive `GET /api/hello` 110,545 req/s before and 114,823 after. Upload `POST /api/upload` 1 MiB was 11,547 before and 11,324 after. Two shorter upload repeats (warmup 1s + measure 4s) were 11,347 and 11,470. The Windows realistic cells were not replaced.
+Shared-path sanity on this host, Glint only, raw HTTP/1.1, c=64, warmup 2s + measure 5s, pinning watcher left on: keep-alive `GET /api/hello` 110,545 req/s before the cut and 114,547 after this safe reuse. Upload `POST /api/upload` 1 MiB was 11,547 before and 11,474 after. The Windows realistic cells were not replaced.
 
 Numbers are machine-local and not a guarantee of production ranking.
 

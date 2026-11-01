@@ -159,8 +159,9 @@ final class ConnectionInputStream extends InputStream {
 
     /**
      * If the bytes at the read cursor are the same header block as the previous
-     * empty-body request on this connection, consume them and return that
-     * request. A miss leaves the cursor where the parser can read normally.
+     * empty-body request on this connection, consume them and return a new
+     * request that shares that parse. The previous instance is left as the
+     * handler saw it. A miss leaves the cursor where the parser can read normally.
      */
     HttpRequest tryRepeatedHeaders() throws IOException {
         byte[] prev = repeatedHeaders;
@@ -182,8 +183,7 @@ final class ConnectionInputStream extends InputStream {
             return null;
         }
         pos += prev.length;
-        req.prepareForReuse();
-        return req;
+        return req.spawnKeepAlive();
     }
 
     /** Note where the next header block starts so it can be saved if the parse stays in this buffer. */
