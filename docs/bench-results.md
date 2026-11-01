@@ -30,10 +30,9 @@ Numbers are machine-local and not a guarantee of production ranking.
 | 2 MiB | Tomcat DefaultServlet | 575 | 0 | 107.76 | 142.79 | 162.96 |
 
 Numbers are machine-local and not a guarantee of production ranking.
-
 ## Realistic suite (Glint vs Tomcat vs Tomcat-VT, same app logic)
 
-- Captured: **2026-11-01 08:56:44 CST** (Asia/Shanghai)
+- Captured: **2026-11-01 09:55:06 CST** (Asia/Shanghai)
 - CPU: AMD Ryzen 7 7840HS w/ Radeon 780M Graphics
 - Logical cores: 16
 - RAM: 31.2 GiB
@@ -90,9 +89,9 @@ Scenarios:
 | conn-per-req | 64 | Glint | 31620 | 31576-31623 | 1.93 | 3.25 | 5.89 | 0 | 0 | 0 | 159 | 355 | 47 |
 | conn-per-req | 64 | Tomcat | 25514 | 25389-25525 | 2.40 | 3.79 | 5.40 | 0 | 0 | 0 | 359 | 507 | 212 |
 | conn-per-req | 64 | Tomcat-VT | 25902 | 25879-25934 | 2.36 | 4.06 | 5.67 | 0 | 0 | 0 | 175 | 419 | 144 |
-| upload-1MiB | 64 | Glint | 2842 | 2701-5676 | 22.17 | 47.34 | 59.28 | 0 | 0 | 0 | 160 | 355 | 45 |
-| upload-1MiB | 64 | Tomcat | 3628 | 3624-3875 | 17.33 | 40.35 | 58.16 | 0 | 0 | 0 | 356 | 517 | 212 |
-| upload-1MiB | 64 | Tomcat-VT | 5417 | 5392-5481 | 8.22 | 41.11 | 54.06 | 0 | 0 | 0 | 167 | 420 | 143 |
+| upload-1MiB | 64 | Glint | 8185 | 7629-8564 | 7.10 | 21.23 | 32.31 | 0 | 0 | 0 | 155 | 301 | 33 |
+| upload-1MiB | 64 | Tomcat | 7631 | 5216-7693 | 7.54 | 29.22 | 56.05 | 0 | 0 | 0 | 166 | 274 | 78 |
+| upload-1MiB | 64 | Tomcat-VT | 9390 | 9069-9409 | 6.03 | 23.82 | 37.70 | 0 | 0 | 0 | 164 | 266 | 82 |
 
 Mixed-traffic breakdown (median round):
 

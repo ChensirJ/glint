@@ -276,7 +276,7 @@ The realistic harness has three server modes. `glint` is virtual-thread-native: 
 
 ### Realistic suite (same handlers, separate JVMs, median of 3 rounds)
 
-Captured **2026-11-01 08:56:44 CST** (Asia/Shanghai). Each server runs in its own JVM (`-Xms256m -Xmx1g -XX:+UseG1GC`); handlers are the same `BenchApp` code; the load generator is a separate JVM using raw HTTP/1.1 sockets on virtual threads. Application errors and timeouts were 0 in every cell. Tomcat-VT is the only mode with connect errors: on blocking-50ms they start at 500 clients (159, then 792, 1,115, and 1,705 at 500 / 1,000 / 2,000 / 4,000 clients) and heap reaches the 1 GiB cap (1,010 MiB at 2,000 clients, RSS 1,154 MiB at 4,000). Glint recorded 0 connect errors in every cell. req/s is the median round; p99 is milliseconds. Min-max, memory, and thread columns are in the docs.
+Captured **2026-11-01 09:55:06 CST** (Asia/Shanghai). Each server runs in its own JVM (`-Xms256m -Xmx1g -XX:+UseG1GC`); handlers are the same `BenchApp` code; the load generator is a separate JVM using raw HTTP/1.1 sockets on virtual threads. Application errors and timeouts were 0 in every cell. Tomcat-VT is the only mode with connect errors: on blocking-50ms they start at 500 clients (159, then 792, 1,115, and 1,705 at 500 / 1,000 / 2,000 / 4,000 clients) and heap reaches the 1 GiB cap (1,010 MiB at 2,000 clients, RSS 1,154 MiB at 4,000). Glint recorded 0 connect errors in every cell. req/s is the median round; p99 is milliseconds. Min-max, memory, and thread columns are in the docs.
 
 | Scenario | Clients | Glint req/s | Tomcat req/s | Tomcat-VT req/s | Glint p99 | Tomcat p99 | Tomcat-VT p99 |
 |----------|--------:|------------:|-------------:|----------------:|----------:|-----------:|--------------:|
@@ -290,17 +290,17 @@ Captured **2026-11-01 08:56:44 CST** (Asia/Shanghai). Each server runs in its ow
 | Mixed: 70% API / 20% 4 KiB / 10% 1 MiB static | 500 | 22,664 | 18,760 | 22,483 | 35.49 | 44.08 | 48.74 |
 | Keep-alive tiny JSON | 64 | 103,508 | 104,795 | 110,092 | 1.14 | 1.11 | 1.03 |
 | New connection per request | 64 | 31,620 | 25,514 | 25,902 | 3.25 | 3.79 | 4.06 |
-| 1 MiB upload (stream + CRC32) | 64 | 2,842 | 3,628 | 5,417 | 47.34 | 40.35 | 41.11 |
+| 1 MiB upload (stream + CRC32) | 64 | 8,185 | 7,631 | 9,390 | 21.23 | 29.22 | 23.82 |
 
 What this shows, including where Tomcat or Tomcat-VT wins:
 
 - **Blocking I/O is the Glint case.** Platform Tomcat stays near `maxThreads / latency` (about 3.1k req/s) and its p99 grows with the queue (1,256.88 ms at 4,000 clients). Glint keeps one virtual thread per connection, so throughput scales (75,538 req/s at 4,000 clients) and p50 stays near the 50 ms sleep (52.19 ms at 4,000). Tomcat-VT scales too, because its workers are virtual threads, but it is still the NIO connector: from 500 clients up it fails connects, p99 climbs to 165.62 ms at 4,000 clients, and heap peaks at 972-1,010 MiB versus Glint's 277 MiB at 4,000 clients.
-- **Uploads: Tomcat-VT leads, then platform Tomcat, then Glint.** 1 MiB stream + CRC32 at 64 clients: Tomcat-VT 5,417 req/s (min-max 5,392-5,481), Tomcat 3,628 (3,624-3,875), Glint 2,842 (2,701-5,676). p50 was 8.22 / 17.33 / 22.17 ms. Glint streams the body with `bodyStream()` / `bodyChannel()` (heap peak 160 MiB on this cell, RSS 355 MiB). A later change to the large-body read path is in this tree and was not part of this Windows run (improvement pending re-bench). Do not quote a higher upload rate until `docs/bench-results.md` is refreshed on that machine.
+- **Uploads: Tomcat-VT still leads; Glint is now ahead of platform Tomcat.** After the large-body read-path change, 1 MiB stream + CRC32 at 64 clients: Tomcat-VT 9,390 req/s (min-max 9,069-9,409), Glint 8,185 (7,629-8,564), Tomcat 7,631 (5,216-7,693). p50 was 7.10 / 7.54 / 6.03 ms (Glint / Tomcat / Tomcat-VT).
 - **JSON + 15 ms DB wait at 200 clients is a tie between Glint and Tomcat** (11,919 vs 11,977 req/s, p50 16.52 vs 16.43 ms). Tomcat-VT lands at 6,441 with p50 31.31 ms: on Windows, virtual-thread `Thread.sleep` stays coarse unless the process raises the timer, and only Glint does that (`-Dglint.highResolutionTimer=false` to opt out). At 1,000 clients Glint leads on req/s (30,906 vs 12,285 vs 16,434) with a wide round spread (21,173-34,191). Heap there was Glint 601 MiB, Tomcat 340 MiB, Tomcat-VT 992 MiB.
 - **Mixed traffic (500 clients):** Glint 22,664 req/s, Tomcat-VT 22,483, Tomcat 18,760. Median-round API p99 was 35.73 ms (Glint), 44.78 ms (Tomcat), 49.41 ms (Tomcat-VT). Glint's req/s spread was the widest (20,704-34,716).
 - **Keep-alive tiny JSON is a Tomcat-VT edge** (110,092 vs Tomcat 104,795 vs Glint 103,508). A new connection per request flips it: Glint 31,620 vs Tomcat-VT 25,902 vs Tomcat 25,514.
 
-Platform threads, virtual threads not counted: Glint stays at 34-48 across the suite. Tomcat reaches 212 once the pool is busy (114 at blocking / 100 clients). Tomcat-VT stays near 29 on the blocking and JSON cells and about 143-146 on keep-alive, new-connection, and upload.
+Platform threads, virtual threads not counted: Glint stays at 33-48 across the suite. Tomcat reaches 212 once the pool is busy (114 at blocking / 100 clients; 78 on the 1 MiB upload). Tomcat-VT stays near 29 on the blocking and JSON cells, about 143-146 on keep-alive and new-connection, and 82 on the 1 MiB upload.
 
 ### `/hello` and static files (in-process microbench, 64 clients, warmup 2s + 5s)
 
