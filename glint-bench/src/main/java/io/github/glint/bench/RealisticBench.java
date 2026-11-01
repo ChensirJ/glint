@@ -19,10 +19,12 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.Random;
 import java.util.SplittableRandom;
 import java.util.concurrent.ExecutorService;
@@ -33,11 +35,20 @@ import java.util.concurrent.Executors;
  * flags and identical {@link BenchApp} handlers; this process is the load generator
  * (raw HTTP/1.1 over blocking sockets, one virtual thread per simulated client).
  *
+ * <p>Servers (system property {@code glint.bench.servers}, default {@code glint,tomcat,tomcat-vt}):</p>
+ * <ul>
+ *   <li>{@code glint} - virtual-thread-native</li>
+ *   <li>{@code tomcat} - embedded defaults, platform thread pool</li>
+ *   <li>{@code tomcat-vt} - same NIO connector and servlet app as {@code tomcat}, with
+ *       {@code StandardVirtualThreadExecutor} on the connector</li>
+ * </ul>
+ *
  * <p>Scenarios: blocking downstream sweep, mixed JSON + DB wait + CPU, mixed static/API
  * traffic, keep-alive vs connection-per-request, and 1 MiB uploads.</p>
  *
  * <p>Usage: {@code RealisticBench [rounds=3] [warmupSec=3] [durationSec=8] [scenarioFilter]}.
- * Replaces the {@code ## Realistic suite} section of {@code docs/bench-results.md}.</p>
+ * A full three-server run replaces the {@code ## Realistic suite} section of
+ * {@code docs/bench-results.md}. A scenario filter or a server subset merges into that section.</p>
  */
 public final class RealisticBench {
 
@@ -87,37 +98,84 @@ public final class RealisticBench {
 
         List<Scenario> scenarios = new ArrayList<>(scenarios());
         if (args.length > 3) {
-            // Optional filter for quick checks; only full runs belong in the docs.
+            // Optional filter for quick checks. A subset merges into the existing section.
             scenarios.removeIf(s -> !s.title().contains(args[3]));
         }
-        Server glint = Server.start("glint", root);
-        Server tomcat = Server.start("tomcat", root);
+        List<String> kinds = selectedServers();
+        List<Server> servers = new ArrayList<>();
+        for (String kind : kinds) {
+            servers.add(Server.start(kind, root));
+        }
         Map<Scenario, List<List<Run>>> results = new LinkedHashMap<>();
         try {
             for (Scenario sc : scenarios) {
-                List<Run> g = new ArrayList<>();
-                List<Run> t = new ArrayList<>();
+                Map<String, List<Run>> byKind = new LinkedHashMap<>();
+                for (String kind : kinds) {
+                    byKind.put(kind, new ArrayList<>());
+                }
                 for (int r = 0; r < rounds; r++) {
-                    // Alternate who goes first so drift (thermal, GC) does not favor one side.
-                    Server[] order = r % 2 == 0 ? new Server[]{glint, tomcat} : new Server[]{tomcat, glint};
-                    for (Server s : order) {
+                    // Rotate who goes first so drift (thermal, GC) does not favor one side.
+                    // Two servers reproduce the old glint/tomcat alternation.
+                    for (int i = 0; i < servers.size(); i++) {
+                        Server s = servers.get((i + r) % servers.size());
                         REASONS.clear();
                         Run run = runOnce(s, sc, warmup, duration);
                         REASONS.forEach((k, v) -> System.out.println("    reason x" + v.sum() + " " + k));
-                        (s == glint ? g : t).add(run);
+                        byKind.get(s.kind).add(run);
                         System.out.printf(Locale.ROOT,
-                                "%-14s c=%-5d %-6s r%d: %8.0f req/s p50=%.2f p99=%.2f p999=%.2f err=%d connErr=%d to=%d %s rss=%dMB%n",
+                                "%-14s c=%-5d %-10s r%d: %8.0f req/s p50=%.2f p99=%.2f p999=%.2f err=%d connErr=%d to=%d %s rss=%dMB%n",
                                 sc.title(), sc.concurrency(), s.kind, r + 1, run.rps(), run.p50(), run.p99(),
                                 run.p999(), run.errors(), run.connectErrors(), run.timeouts(), run.stats(), run.rssMb());
                     }
                 }
-                results.put(sc, List.of(g, t));
+                List<List<Run>> grouped = new ArrayList<>();
+                for (String kind : kinds) {
+                    grouped.add(byKind.get(kind));
+                }
+                results.put(sc, grouped);
             }
         } finally {
-            glint.stop();
-            tomcat.stop();
+            for (Server s : servers) {
+                s.stop();
+            }
         }
         writeMarkdown(when, specs, rounds, warmup, duration, results);
+    }
+
+    /** Child JVM kinds for this run. Default is glint, tomcat, and tomcat-vt, in that order. */
+    static List<String> selectedServers() {
+        String raw = System.getProperty("glint.bench.servers", String.join(",", RealisticServer.KINDS));
+        List<String> kinds = new ArrayList<>();
+        for (String part : raw.split("[,\\s]+")) {
+            String kind = part.trim();
+            if (kind.isEmpty()) {
+                continue;
+            }
+            if (!RealisticServer.KINDS.contains(kind)) {
+                throw new IllegalArgumentException(
+                        "unknown server '" + kind + "'; expected glint, tomcat, tomcat-vt");
+            }
+            if (!kinds.contains(kind)) {
+                kinds.add(kind);
+            }
+        }
+        if (kinds.isEmpty()) {
+            throw new IllegalArgumentException("glint.bench.servers is empty");
+        }
+        return kinds;
+    }
+
+    static boolean allServersSelected() {
+        return new HashSet<>(selectedServers()).equals(new HashSet<>(RealisticServer.KINDS));
+    }
+
+    static String serverLabel(String kind) {
+        return switch (kind) {
+            case RealisticServer.KIND_GLINT -> "Glint";
+            case RealisticServer.KIND_TOMCAT -> "Tomcat";
+            case RealisticServer.KIND_TOMCAT_VT -> "Tomcat-VT";
+            default -> kind;
+        };
     }
 
     static List<Scenario> scenarios() {
@@ -547,7 +605,7 @@ public final class RealisticBench {
             List<String> cmd = new ArrayList<>();
             cmd.add(java);
             cmd.addAll(List.of(JVM_FLAGS));
-            // -Dglint.bench.serverFlags="..." adds server JVM flags (for example JFR) to both sides.
+            // -Dglint.bench.serverFlags="..." adds server JVM flags (for example JFR). {kind} expands per server.
             String extra = System.getProperty("glint.bench.serverFlags", "").trim();
             if (!extra.isEmpty()) {
                 cmd.addAll(List.of(extra.replace("{kind}", kind).split("\\s+")));
@@ -562,7 +620,9 @@ public final class RealisticBench {
             Process p = pb.start();
             BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8));
             String line;
+            String last = null;
             while ((line = r.readLine()) != null) {
+                last = line;
                 if (line.startsWith("READY ")) {
                     int port = Integer.parseInt(line.substring(6).trim());
                     Thread drain = new Thread(() -> {
@@ -579,7 +639,8 @@ public final class RealisticBench {
                     return new Server(kind, p, port);
                 }
             }
-            throw new IOException(kind + " child exited before READY");
+            throw new IOException(kind + " child exited before READY"
+                    + (last == null ? "" : ": " + last));
         }
 
         /** Peak heap / threads since the previous call (the call resets the peaks). */
@@ -673,9 +734,13 @@ public final class RealisticBench {
         m.put("OS", System.getProperty("os.name") + " " + System.getProperty("os.version") + " "
                 + System.getProperty("os.arch"));
         m.put("JDK", System.getProperty("java.vm.name") + " " + System.getProperty("java.runtime.version"));
-        m.put("Tomcat", org.apache.catalina.util.ServerInfo.getServerNumber()
+        String tomcatVersion = org.apache.catalina.util.ServerInfo.getServerNumber();
+        m.put("Tomcat", tomcatVersion
                 + " (embedded, default NIO connector: maxThreads 200, acceptCount 100)");
-        m.put("Server JVM flags", String.join(" ", JVM_FLAGS) + " (same for both, separate child JVMs)");
+        m.put("Tomcat-VT", tomcatVersion
+                + " (same embedded NIO connector and servlet app; worker executor StandardVirtualThreadExecutor; "
+                + "acceptor and poller stay platform threads)");
+        m.put("Server JVM flags", String.join(" ", JVM_FLAGS) + " (same flags, one child JVM per server)");
         return m;
     }
 
@@ -688,20 +753,48 @@ public final class RealisticBench {
     static void writeMarkdown(String when, Map<String, String> specs, int rounds, int warmup, int duration,
                               Map<Scenario, List<List<Run>>> results) throws IOException {
         StringBuilder sb = new StringBuilder();
-        sb.append("\n## Realistic suite (Glint vs Tomcat, same app logic)\n\n");
+        sb.append("\n## Realistic suite (Glint vs Tomcat vs Tomcat-VT, same app logic)\n\n");
         sb.append("- Captured: **").append(when).append("** (Asia/Shanghai)\n");
         specs.forEach((k, v) -> sb.append("- ").append(k).append(": ").append(v).append('\n'));
+        sb.append("- Server modes: `glint` is virtual-thread-native (one virtual thread per connection); ")
+                .append("`tomcat` is embedded Tomcat on the default NIO connector with a platform thread pool ")
+                .append("(maxThreads 200); `tomcat-vt` is the same servlet app and the same NIO connector with ")
+                .append("`StandardVirtualThreadExecutor` (one virtual thread per request task). ")
+                .append("Acceptor and poller stay platform threads. Tomcat-VT is still NIO/Servlet, ")
+                .append("not virtual-thread-native like Glint.\n");
+        sb.append("- Servers in this run: ");
+        List<String> kinds = new ArrayList<>();
+        for (List<List<Run>> groups : results.values()) {
+            for (List<Run> runs : groups) {
+                if (!runs.isEmpty() && !kinds.contains(runs.get(0).server())) {
+                    kinds.add(runs.get(0).server());
+                }
+            }
+            break;
+        }
+        for (int i = 0; i < kinds.size(); i++) {
+            if (i > 0) {
+                sb.append(", ");
+            }
+            sb.append('`').append(kinds.get(i)).append('`');
+        }
+        sb.append('\n');
         sb.append("- Load generator: `RealisticBench`, raw HTTP/1.1 over blocking sockets, one virtual thread per ")
-                .append("client, closed loop, same machine (loopback), separate JVM from both servers\n");
+                .append("client, closed loop, same machine (loopback), separate JVM from the servers\n");
         sb.append("- Each cell: warmup ").append(warmup).append("s + measure ").append(duration)
-                .append("s, ").append(rounds).append(" rounds alternating server order; ")
+                .append("s, ").append(rounds).append(" rounds rotating which server goes first; ")
                 .append("the median round by req/s is shown with the min-max req/s across rounds\n");
-        sb.append("- Handlers: identical `BenchApp` code on both servers; Glint uses default settings except ")
-                .append("maxRequestBodyBytes 16 MiB (for uploads); Tomcat uses embedded defaults\n");
+        sb.append("- Handlers: identical `BenchApp` code on every server; Glint uses default settings except ")
+                .append("maxRequestBodyBytes 16 MiB (for uploads); `tomcat` uses embedded defaults; ")
+                .append("`tomcat-vt` uses that same servlet app with a virtual-thread executor on the connector\n");
         sb.append("- Heap peak and platform-thread peak are sampled every 50 ms inside the server JVM during the ")
-                .append("measured window; RSS is the process working set right after it\n");
-        sb.append("- Re-run: `powershell -File scripts/run-bench.ps1` (all suites) or see the script for the ")
-                .append("single `java -cp ... RealisticBench 3 3 8` command\n\n");
+                .append("measured window; RSS is the process working set right after it. ")
+                .append("Platform-thread counts do not include virtual threads, so Tomcat-VT worker threads are ")
+                .append("absent from that column the same way Glint's are\n");
+        sb.append("- Re-run: `powershell -File scripts/run-bench.ps1` (all suites, three realistic servers) or ")
+                .append("`powershell -File scripts/run-bench.ps1 -Servers \"glint,tomcat\"` for the original pair. ")
+                .append("A single suite is `java -cp ... -Dglint.bench.servers=glint,tomcat,tomcat-vt ")
+                .append("io.github.glint.bench.RealisticBench 3 3 8`\n\n");
         sb.append("Scenarios:\n\n");
         sb.append("- blocking-50ms: `GET /api/slow`, handler sleeps ").append(BenchApp.SLOW_MS)
                 .append(" ms (slow downstream), keep-alive\n");
@@ -724,13 +817,13 @@ public final class RealisticBench {
                 double max = runs.stream().mapToDouble(Run::rps).max().orElse(0);
                 sb.append(String.format(Locale.ROOT,
                         "| %s | %d | %s | %.0f | %.0f-%.0f | %.2f | %.2f | %.2f | %d | %d | %d | %s | %d | %s |%n",
-                        sc.title(), sc.concurrency(), m.server().equals("glint") ? "Glint" : "Tomcat",
+                        sc.title(), sc.concurrency(), serverLabel(m.server()),
                         m.rps(), min, max, m.p50(), m.p99(), m.p999(), m.errors(), m.connectErrors(), m.timeouts(),
                         m.stats().getOrDefault("heapPeakMB", "?"), m.rssMb(),
                         m.stats().getOrDefault("threadsPeak", "?")));
                 for (ClassStats cs : m.classes()) {
                     classes.append(String.format(Locale.ROOT, "| %s | %s | %d | %.2f | %.2f | %.2f |%n",
-                            m.server().equals("glint") ? "Glint" : "Tomcat", cs.label(), cs.ok(),
+                            serverLabel(m.server()), cs.label(), cs.ok(),
                             cs.p50(), cs.p99(), cs.p999()));
                 }
             }
@@ -747,9 +840,12 @@ public final class RealisticBench {
         sb.append("\nCaveats: closed-loop load (a slow server also slows the generator, so tail latency is ")
                 .append("understated versus an open-loop tool such as wrk2); generator and server share the same CPU; ")
                 .append("Glint streams request bodies via bodyStream()/bodyChannel() (bodyBytes() still buffers when called); ")
-                .append("platform-thread counts exclude Glint's virtual threads by design; ")
+                .append("platform-thread counts exclude virtual threads by design (Glint connection threads and ")
+                .append("Tomcat-VT request workers). Tomcat-VT is still the NIO connector plus the Servlet container; ")
+                .append("only the worker executor is virtual threads. ")
                 .append("simulated waits use Thread.sleep, and on Windows JDK 21 virtual-thread timed sleeps are ")
-                .append("coarser under load than platform-thread sleeps, which penalizes Glint in sleep-heavy cells.\n");
+                .append("coarser under load than platform-thread sleeps, which penalizes Glint and Tomcat-VT ")
+                .append("in sleep-heavy cells.\n");
 
         // -Dglint.bench.out=<file> writes elsewhere (for before/after captures).
         Path out = Path.of(System.getProperty("glint.bench.out", "docs/bench-results.md"));
@@ -760,9 +856,17 @@ public final class RealisticBench {
             existing = existing.substring(0, cut);
         }
         String section = sb.toString();
-        // Filtered runs only replace matching scenario rows so other cells stay.
-        if (!previousSection.isEmpty() && results.size() < scenarios().size()) {
+        // A scenario filter or a server subset replaces only the cells it re-measured.
+        if (!previousSection.isEmpty() && (results.size() < scenarios().size() || !allServersSelected())) {
             section = mergeRealisticSection(previousSection, section, results.keySet());
+        }
+        int timer = previousSection.indexOf("\n## Windows timer note");
+        if (timer >= 0 && !section.contains("## Windows timer note")) {
+            String note = previousSection.substring(timer + 1);
+            if (!note.endsWith("\n")) {
+                note = note + "\n";
+            }
+            section = section.stripTrailing() + "\n" + note;
         }
         Files.writeString(out, existing.stripTrailing() + "\n" + section);
         System.out.println("Wrote " + out.toAbsolutePath());
@@ -770,25 +874,31 @@ public final class RealisticBench {
 
     /**
      * Keep rows from {@code previous} whose scenario title was not re-measured.
+     * Within a re-measured scenario, only servers present in {@code fresh} are replaced;
+     * other servers (for example historical Tomcat rows when only {@code tomcat-vt} was run)
+     * stay, and new servers are inserted after that client group.
      * Header, scenario blurb, caveats, and any breakdown tables come from {@code previous},
      * except the Captured line and the buffering caveat which are refreshed from {@code fresh}.
      */
-    static String mergeRealisticSection(String previous, String fresh,
-                                        java.util.Set<Scenario> updated) {
-        java.util.Set<String> titles = new java.util.HashSet<>();
+    static String mergeRealisticSection(String previous, String fresh, Set<Scenario> updated) {
+        Set<String> titles = new HashSet<>();
         for (Scenario s : updated) {
             titles.add(s.title());
         }
-        java.util.Map<String, java.util.List<String>> freshRows = new java.util.LinkedHashMap<>();
+        Map<String, List<String>> freshByGroup = new LinkedHashMap<>();
+        Map<String, String> freshByKey = new LinkedHashMap<>();
         for (String line : fresh.split("\n", -1)) {
             if (!isMainResultRow(line)) {
                 continue;
             }
             String title = tableTitle(line);
-            if (title == null || !titles.contains(title)) {
+            String group = tableGroup(line);
+            String server = tableServer(line);
+            if (title == null || group == null || server == null || !titles.contains(title)) {
                 continue;
             }
-            freshRows.computeIfAbsent(title, k -> new java.util.ArrayList<>()).add(line);
+            freshByGroup.computeIfAbsent(group, k -> new ArrayList<>()).add(line);
+            freshByKey.put(group + "\0" + server, line);
         }
         String captured = null;
         for (String line : fresh.split("\n", -1)) {
@@ -800,6 +910,9 @@ public final class RealisticBench {
         StringBuilder out = new StringBuilder();
         boolean inMainTable = false;
         boolean mainHeaderSeen = false;
+        String openGroup = null;
+        Set<String> emittedServers = new HashSet<>();
+        Set<String> seenGroups = new HashSet<>();
         for (String line : previous.split("\n", -1)) {
             if (captured != null && line.startsWith("- Captured:")) {
                 out.append(captured).append('\n');
@@ -839,41 +952,78 @@ public final class RealisticBench {
                 continue;
             }
             if (inMainTable && isMainResultRow(line)) {
+                String group = tableGroup(line);
+                if (openGroup != null && !openGroup.equals(group)) {
+                    appendMissingServers(out, openGroup, freshByGroup, emittedServers);
+                    emittedServers.clear();
+                }
+                openGroup = group;
+                if (group != null) {
+                    seenGroups.add(group);
+                }
                 String title = tableTitle(line);
-                if (title != null && titles.contains(title)) {
-                    if (freshRows.containsKey(title)) {
-                        for (String fr : freshRows.remove(title)) {
-                            out.append(fr).append('\n');
-                        }
+                String server = tableServer(line);
+                if (title != null && titles.contains(title) && server != null) {
+                    String freshLine = freshByKey.get(group + "\0" + server);
+                    if (freshLine != null) {
+                        out.append(freshLine).append('\n');
+                        emittedServers.add(server);
+                        continue;
                     }
-                    continue;
                 }
                 out.append(line).append('\n');
                 continue;
             }
             if (inMainTable) {
-                for (java.util.List<String> rows : freshRows.values()) {
-                    for (String fr : rows) {
-                        out.append(fr).append('\n');
-                    }
+                if (openGroup != null) {
+                    appendMissingServers(out, openGroup, freshByGroup, emittedServers);
+                    openGroup = null;
+                    emittedServers.clear();
                 }
-                freshRows.clear();
+                appendUnseenGroups(out, freshByGroup, seenGroups);
                 inMainTable = false;
             }
             out.append(line).append('\n');
         }
         if (inMainTable) {
-            for (java.util.List<String> rows : freshRows.values()) {
-                for (String fr : rows) {
-                    out.append(fr).append('\n');
-                }
+            if (openGroup != null) {
+                appendMissingServers(out, openGroup, freshByGroup, emittedServers);
             }
+            appendUnseenGroups(out, freshByGroup, seenGroups);
         }
         if (!mainHeaderSeen) {
             return fresh.endsWith("\n") ? fresh : fresh + "\n";
         }
         String s = out.toString();
         return s.endsWith("\n") ? s : s + "\n";
+    }
+
+    private static void appendMissingServers(StringBuilder out, String group,
+                                              Map<String, List<String>> freshByGroup,
+                                              Set<String> emittedServers) {
+        List<String> rows = freshByGroup.get(group);
+        if (rows == null) {
+            return;
+        }
+        for (String row : rows) {
+            String server = tableServer(row);
+            if (server != null && emittedServers.add(server)) {
+                out.append(row).append('\n');
+            }
+        }
+    }
+
+    private static void appendUnseenGroups(StringBuilder out, Map<String, List<String>> freshByGroup,
+                                            Set<String> seenGroups) {
+        for (Map.Entry<String, List<String>> e : freshByGroup.entrySet()) {
+            if (seenGroups.contains(e.getKey())) {
+                continue;
+            }
+            for (String row : e.getValue()) {
+                out.append(row).append('\n');
+            }
+            seenGroups.add(e.getKey());
+        }
     }
 
     /** True for data rows of the main Scenario/Clients/Server table (not breakdown). */
@@ -885,12 +1035,12 @@ public final class RealisticBench {
         if (title == null || title.isEmpty()) {
             return false;
         }
-        String[] parts = line.split("\\|", -1);
-        if (parts.length < 5) {
-            return false;
-        }
-        String server = parts[3].trim();
-        return server.equals("Glint") || server.equals("Tomcat");
+        String server = tableServer(line);
+        return isBenchServer(server);
+    }
+
+    static boolean isBenchServer(String server) {
+        return "Glint".equals(server) || "Tomcat".equals(server) || "Tomcat-VT".equals(server);
     }
 
     static String tableTitle(String row) {
@@ -902,5 +1052,23 @@ public final class RealisticBench {
             return null;
         }
         return row.substring(1, a).trim();
+    }
+
+    static String tableServer(String row) {
+        String[] parts = row.split("\\|", -1);
+        if (parts.length < 4) {
+            return null;
+        }
+        return parts[3].trim();
+    }
+
+    /** Title plus client count, so blocking-50ms rows at different concurrencies stay distinct. */
+    static String tableGroup(String row) {
+        String title = tableTitle(row);
+        String[] parts = row.split("\\|", -1);
+        if (title == null || parts.length < 3) {
+            return null;
+        }
+        return title + "\0" + parts[2].trim();
     }
 }

@@ -30,6 +30,17 @@ Numbers are machine-local and not a guarantee of production ranking.
 | 2 MiB | Tomcat DefaultServlet | 243 | 0 | 275.66 | 421.08 | 445.15 |
 
 Numbers are machine-local and not a guarantee of production ranking.
+
+## Realistic server modes
+
+`RealisticBench` starts one child JVM per server. Re-run `scripts/run-bench.ps1` to measure all three. Pass `-Servers "glint,tomcat"` to measure the original pair only.
+
+- `glint`: Glint, virtual-thread-native. Each accepted connection runs on a virtual thread.
+- `tomcat`: embedded Tomcat, default NIO connector, platform thread pool (`maxThreads` 200, `acceptCount` 100). This mode is unchanged.
+- `tomcat-vt`: the same servlet application and the same NIO connector as `tomcat`, with `org.apache.catalina.core.StandardVirtualThreadExecutor` on the connector (one virtual thread per request task). The acceptor and the poller stay on platform threads. This is still NIO/Servlet, not a virtual-thread-native server like Glint.
+
+Reported columns stay the same (req/s, p50, p99, p99.9, errors, connect errors, timeouts, heap, RSS, platform-thread peak). Platform-thread counts do not include virtual threads, so Tomcat-VT worker threads are absent from that column the same way Glint's are.
+
 ## Realistic suite (Glint vs Tomcat, same app logic)
 
 - Captured: **2026-10-30 16:22:35 CST** (Asia/Shanghai); upload-1MiB rows re-measured after streaming bodies; json+db+cpu rows re-measured at **2026-10-30 17:10:39 CST** after the Windows timer fix (1 round, see note below); other realistic cells kept from 15:56:21 CST
@@ -44,7 +55,7 @@ Numbers are machine-local and not a guarantee of production ranking.
 - Each cell: warmup 3s + measure 8s, 3 rounds alternating server order; the median round by req/s is shown with the min-max req/s across rounds
 - Handlers: identical `BenchApp` code on both servers; Glint uses default settings except maxRequestBodyBytes 16 MiB (for uploads); Tomcat uses embedded defaults
 - Heap peak and platform-thread peak are sampled every 50 ms inside the server JVM during the measured window; RSS is the process working set right after it
-- Re-run: `powershell -File scripts/run-bench.ps1` (all suites) or see the script for the single `java -cp ... RealisticBench 3 3 8` command
+- Re-run: `powershell -File scripts/run-bench.ps1` (all suites; realistic portion is Glint vs Tomcat vs Tomcat-VT). `-Servers "glint,tomcat"` keeps the original pair. A single suite is `java -cp ... -Dglint.bench.servers=glint,tomcat,tomcat-vt io.github.glint.bench.RealisticBench 3 3 8`
 
 Scenarios:
 

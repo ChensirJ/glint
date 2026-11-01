@@ -12,8 +12,9 @@ import java.util.Map;
 import java.util.zip.CRC32;
 
 /**
- * Application logic shared verbatim by the Glint and Tomcat sides of {@link RealisticBench}.
- * Only the HTTP adapter differs between the two servers.
+ * Application logic shared verbatim by the Glint and Tomcat sides of {@link RealisticBench}
+ * ({@code tomcat} and {@code tomcat-vt} use the same servlet adapter).
+ * Only the HTTP adapter differs between Glint and Tomcat.
  */
 public final class BenchApp {
 
