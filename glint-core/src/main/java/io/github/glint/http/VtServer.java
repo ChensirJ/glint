@@ -148,9 +148,10 @@ public final class VtServer implements AutoCloseable {
                     return;
                 }
                 req.remoteAddress(clientAddress(socket));
-                // Large uploads: widen the TCP window, then read through a direct
-                // buffer. Done after the header parse so small requests keep the
-                // default socket buffers (thousands of idle connections stay cheap).
+                // Large uploads: widen the TCP window so the body can sit in the
+                // socket, then let the handler read straight into its own array.
+                // Done after the header parse so small requests keep the default
+                // socket buffers (thousands of idle connections stay cheap).
                 if (req.contentLength() >= ConnectionInputStream.LARGE_BODY_BYTES) {
                     if (!uploadTuned) {
                         widenReceiveBuffer(socket, req.contentLength());
@@ -218,9 +219,10 @@ public final class VtServer implements AutoCloseable {
     }
 
     /**
-     * Ask the kernel for a receive window large enough to hold the rest of a
-     * big body. Best effort: some OS caps are lower, and the direct buffer
-     * still applies when this call is ignored.
+     * Ask the kernel for a receive window large enough to hold a big body.
+     * Best effort: some OS caps are lower, and the caller-buffer read still
+     * applies when this call is ignored. This is the window size, not the
+     * size of one recv (that stays at {@link ConnectionInputStream#MAX_SOCKET_READ}).
      */
     private static void widenReceiveBuffer(Socket socket, long contentLength) {
         int want = (int) Math.min(1024 * 1024L, Math.max(contentLength, ConnectionInputStream.LARGE_BUFFER));

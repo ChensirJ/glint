@@ -55,7 +55,7 @@ Scenarios:
 - json+db+cpu: `POST /api/order` with a 7 KiB JSON order (60 lines): parse, price lines, SHA-256 x5 over the body, sleep 15 ms, serialize a ~5 KiB JSON response
 - mixed-traffic: 70% `GET /api/item` (10 ms wait + 1 KiB JSON), 20% 4 KiB static CSS, 10% 1 MiB static file
 - keep-alive vs conn-per-req: `GET /api/hello` tiny JSON; conn-per-req sends `Connection: close` and opens a new TCP connection for every request
-- upload-1MiB: `POST /api/upload` with a 1 MiB body; handler streams via bodyStream() and returns CRC32
+- upload-1MiB: `POST /api/upload` with a 1 MiB body; handler streams via bodyStream() and returns CRC32. The upload rows below are the 2026-11-01 Windows capture. Caller-buffer reads (128 KiB socket cap) are not included. Pending Windows rebench: `java -Dglint.bench.servers=glint,tomcat,tomcat-vt -cp <bench-cp> io.github.glint.bench.RealisticBench 3 3 8 upload` on DESKTOP-03H8O4I. Do not replace these cells with a Linux smoke run.
 
 | Scenario | Clients | Server | req/s (median) | req/s min-max | p50 ms | p99 ms | p99.9 ms | errors | connect errors | timeouts | heap peak MiB | RSS MiB | platform threads peak |
 |----------|--------:|--------|---------------:|---------------|-------:|-------:|---------:|-------:|---------------:|---------:|--------------:|--------:|----------------------:|
