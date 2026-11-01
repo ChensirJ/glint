@@ -53,7 +53,7 @@ cd ..\glint-demo
 | `glint-servlet` | Jakarta Servlet 6 adapter (filter chain, sessions, multipart `Part`s, async stub) |
 | `glint-spring-boot-starter` | Drop-in Tomcat replacement |
 | `glint-examples` | Standalone + Spring Boot demos |
-| `glint-bench` | Glint vs Tomcat harness: `/hello`, static files, and a realistic suite (blocking I/O sweep, JSON + DB wait, mixed traffic, keep-alive vs short connections, uploads) |
+| `glint-bench` | Glint vs Tomcat harness: `/hello`, static files, and a realistic suite (blocking I/O sweep, JSON + DB wait, mixed traffic, keep-alive vs short connections, uploads) against platform-thread Tomcat and Tomcat with virtual threads |
 
 ## Quick start - standalone
 
@@ -272,7 +272,9 @@ powershell -ExecutionPolicy Bypass -File scripts/run-bench.ps1   # -Rounds 3 -Wa
 
 Numbers are machine-local, loopback-only, and not a guarantee of production ranking. Re-run before quoting.
 
-### Realistic suite (same handlers on both servers, separate JVMs, median of 3 rounds)
+The realistic harness has three server modes. `glint` is virtual-thread-native. `tomcat` is embedded Tomcat on the default NIO connector with a platform thread pool (`maxThreads` 200) and is unchanged, so the tables below stay reproducible. `tomcat-vt` runs the same servlet app and the same NIO connector, with Tomcat's `StandardVirtualThreadExecutor` on the connector (one virtual thread per request task). The acceptor and poller stay platform threads: Tomcat-VT is still NIO/Servlet, not virtual-thread-native like Glint. The tables below do not include Tomcat-VT rows yet. `scripts/run-bench.ps1` measures all three and writes them to `docs/bench-results.md`. Pass `-Servers "glint,tomcat"` to measure only the original pair.
+
+### Realistic suite (same handlers, separate JVMs, median of 3 rounds)
 
 Captured **2026-10-30 15:56 CST** (Asia/Shanghai). Each server runs in its own JVM (`-Xms256m -Xmx1g`); handlers are the same `BenchApp` code; the load generator is a separate JVM using raw HTTP/1.1 sockets on virtual threads. Every cell finished with 0 errors, 0 connect errors, and 0 timeouts. The two JSON rows were re-measured at 17:10 CST (single round) after the Windows timer fix; see [docs/bench-results.md](docs/bench-results.md).
 
@@ -342,7 +344,7 @@ Requires **JDK 21+** and **Maven 3.9+**.
 - [x] Path params, middleware, diagnostics JSON + `/_vt` dashboard
 - [x] OTLP/HTTP JSON metrics endpoint + ObsExporter SPI
 - [x] Optional TLS via SSLContext
-- [x] Benchmark module (`glint-bench`): microbench, static files, realistic Glint vs Tomcat suite
+- [x] Benchmark module (`glint-bench`): microbench, static files, realistic Glint vs Tomcat vs Tomcat-VT suite
 - [x] GitHub Actions CI (`mvn -B clean verify`, JDK 21) and tag-driven release workflow
 - [x] Servlet adapter + Spring Boot starter (Hello World)
 - [ ] Full OTLP trace export / SDK bridge module
